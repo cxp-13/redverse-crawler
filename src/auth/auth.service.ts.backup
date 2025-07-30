@@ -1,0 +1,1012 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Redis } from '@upstash/redis';
+import { Page } from 'puppeteer';
+import { BrowserService } from '../browser/browser.service';
+
+export interface LoginStatus {
+  isLoggedIn: boolean;
+  lastChecked: Date;
+  cookiesExpireAt?: Date;
+  error?: string;
+}
+
+interface QrLoginSession {
+  page: Page;
+  qrCodeUrl: string;
+  createdAt: Date;
+  isMonitoring: boolean;
+}
+
+@Injectable()
+export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+  private redis: Redis;
+  private readonly REDIS_KEY = 'xiaohongshu:auth';
+  private readonly COOKIES_KEY = 'xiaohongshu:cookies';
+  private readonly XHS_LOGIN_URL = 'https://www.xiaohongshu.com/explore';
+  private readonly COOKIE_EXPIRE_DAYS = 7; // Cookie保存7天
+  
+  // 页面状态管理
+  private currentQrSession: QrLoginSession | null = null;
+  private readonly QR_CODE_EXPIRE_TIME = 300000; // 二维码5分钟过期，给用户足够时间
+  private readonly LOGIN_CHECK_XPATH = '//*[@id="app"]/div[1]/div/div[1]/div[3]/div[1]'; // 登录界面特有元素
+
+  constructor(
+    private browserService: BrowserService,
+    private configService: ConfigService,
+  ) {
+    this.initRedis();
+    
+    // 不在服务启动时检查登录状态，避免不必要的Redis读取错误
+    // 只在实际需要时才读取凭证
+  }
+
+  private initRedis() {
+    const upstashUrl = this.configService.get<string>('UPSTASH_REDIS_REST_URL');
+    const upstashToken = this.configService.get<string>('UPSTASH_REDIS_REST_TOKEN');
+
+    if (!upstashUrl || !upstashToken) {
+      throw new Error('Upstash Redis URL and Token must be provided');
+    }
+
+    this.redis = new Redis({
+      url: upstashUrl,
+      token: upstashToken,
+    });
+
+    this.logger.log('[REDIS] ✅ Upstash Redis client initialized successfully');
+  }
+
+  // 服务启动时初始化登录状态
+  private async initializeLoginStatus(): Promise<void> {
+    try {
+      this.logger.log('🚀 [INIT] Initializing login status on service startup...');
+      
+      // 检查是否有完整的保存凭证（cookies、localStorage、sessionStorage）
+      const savedCookies = await this.loadCookiesFromRedis();
+      const hasLocalStorage = await this.redis.get('xiaohongshu:localStorage');
+      const hasSessionStorage = await this.redis.get('xiaohongshu:sessionStorage');
+      
+      if (savedCookies && savedCookies.length > 0) {
+        this.logger.log(`🔍 [INIT] Found saved credentials:`);
+        this.logger.log(`  🍪 Cookies: ${savedCookies.length} items`);
+        this.logger.log(`  🗃️ LocalStorage: ${hasLocalStorage ? 'Available' : 'None'}`);
+        this.logger.log(`  📦 SessionStorage: ${hasSessionStorage ? 'Available' : 'None'}`);
+        
+        // 验证凭证是否仍然有效
+        this.logger.log('🔍 [INIT] Verifying saved credentials...');
+        const isLoggedIn = await this.checkLoginStatus();
+        
+        if (isLoggedIn) {
+          this.logger.log('✅ [INIT] Login status recovered successfully from saved credentials');
+          this.logger.log('🎉 [INIT] User can start using the system without logging in again!');
+        } else {
+          this.logger.warn('❌ [INIT] Saved credentials are invalid, user will need to login again');
+          await this.clearAllAuthData();
+        }
+      } else {
+        this.logger.log('⚪ [INIT] No saved credentials found, user will need to login');
+        await this.saveLoginStatus({
+          isLoggedIn: false,
+          lastChecked: new Date(),
+        });
+      }
+    } catch (error) {
+      this.logger.error('❌ [INIT] Failed to initialize login status:', error);
+    }
+  }
+
+  async getLoginStatus(): Promise<LoginStatus> {
+    // 首先检查当前会话是否有登录
+    if (this.currentQrSession) {
+      const sessionLogin = await this.checkCurrentSessionLogin();
+      if (sessionLogin) {
+        // 如果会话中检测到登录，返回最新状态
+        return {
+          isLoggedIn: true,
+          lastChecked: new Date(),
+          cookiesExpireAt: new Date(Date.now() + this.COOKIE_EXPIRE_DAYS * 24 * 60 * 60 * 1000),
+        };
+      }
+    }
+
+    try {
+      const statusStr = await this.redis.get(this.REDIS_KEY);
+      if (statusStr) {
+        // 检查是否是有效的 JSON 字符串
+        if (typeof statusStr === 'string' && statusStr.startsWith('{')) {
+          const parsed = JSON.parse(statusStr);
+          // 验证解析后的对象包含必要的字段
+          if (parsed && typeof parsed.isLoggedIn === 'boolean') {
+            return {
+              ...parsed,
+              lastChecked: new Date(parsed.lastChecked),
+              cookiesExpireAt: parsed.cookiesExpireAt ? new Date(parsed.cookiesExpireAt) : undefined,
+            };
+          }
+        }
+        
+        // 如果数据格式不正确，清除并记录
+        this.logger.warn(`Invalid login status data in Redis: ${statusStr}, clearing...`);
+        await this.redis.del(this.REDIS_KEY);
+      }
+    } catch (error) {
+      this.logger.error('Failed to get login status from Redis:', error);
+      // 清除损坏的数据
+      try {
+        await this.redis.del(this.REDIS_KEY);
+        this.logger.log('Cleared corrupted login status data from Redis');
+      } catch (cleanupError) {
+        this.logger.error('Failed to cleanup corrupted data:', cleanupError);
+      }
+    }
+
+    return {
+      isLoggedIn: false,
+      lastChecked: new Date(),
+    };
+  }
+
+  async saveLoginStatus(status: LoginStatus): Promise<void> {
+    try {
+      // 确保日期对象被正确序列化
+      const statusToSave = {
+        isLoggedIn: status.isLoggedIn,
+        lastChecked: status.lastChecked.toISOString(),
+        cookiesExpireAt: status.cookiesExpireAt ? status.cookiesExpireAt.toISOString() : undefined,
+        error: status.error,
+      };
+      
+      const jsonString = JSON.stringify(statusToSave);
+      await this.redis.setex(this.REDIS_KEY, 3600 * 24, jsonString); // 24小时过期
+      
+      this.logger.log(`Saved login status to Redis: ${jsonString}`);
+    } catch (error) {
+      this.logger.error('Failed to save login status to Redis:', error);
+    }
+  }
+
+  // 保存Cookies到Redis
+  async saveCookiesToRedis(cookies: any[]): Promise<void> {
+    try {
+      const expireSeconds = this.COOKIE_EXPIRE_DAYS * 24 * 3600;
+      await this.redis.setex(this.COOKIES_KEY, expireSeconds, JSON.stringify(cookies));
+      
+      const expireDate = new Date();
+      expireDate.setDate(expireDate.getDate() + this.COOKIE_EXPIRE_DAYS);
+      
+      this.logger.log(`Saved ${cookies.length} cookies to Redis, expires at: ${expireDate.toISOString()}`);
+    } catch (error) {
+      this.logger.error('Failed to save cookies to Redis:', error);
+    }
+  }
+
+  // 从Redis加载Cookies
+  async loadCookiesFromRedis(): Promise<any[] | null> {
+    try {
+      const cookiesStr = await this.redis.get(this.COOKIES_KEY);
+      if (cookiesStr) {
+        // 检查数据格式是否正确
+        if (typeof cookiesStr === 'string' && cookiesStr.startsWith('[')) {
+          const cookies = JSON.parse(cookiesStr);
+          this.logger.log(`🔄 [LOAD] Loaded ${cookies.length} cookies from Redis`);
+          return cookies;
+        } else {
+          this.logger.warn('⚠️ [LOAD] Invalid cookie data format in Redis, clearing...');
+          await this.redis.del(this.COOKIES_KEY);
+          return null;
+        }
+      }
+      this.logger.log('⚪ [LOAD] No cookies found in Redis');
+      return null;
+    } catch (error) {
+      this.logger.error('❌ [LOAD] Failed to load cookies from Redis:', error);
+      // 清除损坏的数据
+      try {
+        await this.redis.del(this.COOKIES_KEY);
+        this.logger.log('🗑️ [LOAD] Cleared corrupted cookie data from Redis');
+      } catch (cleanupError) {
+        this.logger.error('❌ [LOAD] Failed to cleanup corrupted cookie data:', cleanupError);
+      }
+      return null;
+    }
+  }
+
+  // 清除保存的Cookies
+  async clearCookiesFromRedis(): Promise<void> {
+    try {
+      await this.redis.del(this.COOKIES_KEY);
+      this.logger.log('Cleared cookies from Redis');
+    } catch (error) {
+      this.logger.error('Failed to clear cookies from Redis:', error);
+    }
+  }
+
+  async checkLoginStatus(): Promise<boolean> {
+    const page = await this.browserService.createPage();
+    
+    try {
+      this.logger.log('🔍 [CHECK] Starting login status check...');
+
+      // 加载所有保存的凭证
+      await this.loadSavedCredentials(page);
+
+      await page.goto(this.XHS_LOGIN_URL, { waitUntil: 'networkidle2', timeout: 30000 });
+
+      // 等待页面稳定
+      await page.waitForTimeout(2000);
+
+      // 使用精确的XPath检测是否需要登录
+      const needLogin = await this.isLoginRequired(page);
+
+      const expireDate = new Date();
+      expireDate.setDate(expireDate.getDate() + this.COOKIE_EXPIRE_DAYS);
+
+      const status: LoginStatus = {
+        isLoggedIn: !needLogin,
+        lastChecked: new Date(),
+        cookiesExpireAt: needLogin ? undefined : expireDate,
+      };
+
+      if (!needLogin) {
+        // 如果已登录，保存最新的凭证
+        const currentCookies = await page.cookies();
+        if (currentCookies.length > 0) {
+          await this.saveCredentials(page, currentCookies);
+        }
+        this.logger.log('✅ [CHECK] Login status verified: LOGGED IN');
+      } else {
+        // 如果需要登录，清除无效的凭证
+        await this.clearAllAuthData();
+        this.logger.log('❌ [CHECK] Login status verified: NOT LOGGED IN');
+      }
+
+      await this.saveLoginStatus(status);
+      return !needLogin;
+
+    } catch (error) {
+      this.logger.error('❌ [CHECK] Failed to check login status:', error);
+      await this.saveLoginStatus({
+        isLoggedIn: false,
+        lastChecked: new Date(),
+        error: error.message,
+      });
+      return false;
+    } finally {
+      await page.close();
+    }
+  }
+
+  async startLoginProcess(): Promise<{ qrCodeUrl?: string; error?: string }> {
+    // 检查当前会话是否有效
+    if (this.isQrSessionValid()) {
+      this.logger.log('Reusing existing valid QR code session');
+      return { qrCodeUrl: this.currentQrSession!.qrCodeUrl };
+    }
+
+    // 清理无效的会话
+    await this.cleanupQrSession();
+
+    // 首先检查是否已经有保存的有效凭证
+    this.logger.log('🔄 [START_LOGIN] Checking for existing valid credentials...');
+    try {
+      const hasValidCredentials = await this.checkLoginStatus();
+      if (hasValidCredentials) {
+        this.logger.log('✅ [START_LOGIN] Found valid credentials, user is already logged in!');
+        return { error: 'User is already logged in with saved credentials' };
+      }
+    } catch (error) {
+      this.logger.warn('⚠️ [START_LOGIN] Error checking existing credentials:', error);
+    }
+
+    this.logger.log('Creating new QR code session...');
+    const page = await this.browserService.createPage();
+    
+    try {
+      // 在导航之前，先尝试加载保存的凭证
+      this.logger.log('🔄 [START_LOGIN] Loading any saved credentials before navigation...');
+      await this.loadSavedCredentials(page);
+      
+      this.logger.log('Navigating to Xiaohongshu login page...');
+      await page.goto(this.XHS_LOGIN_URL, { waitUntil: 'networkidle2', timeout: 30000 });
+
+      // 等待页面完全加载
+      await page.waitForTimeout(3000);
+      
+      // 再次检查是否因为加载的凭证而已经登录
+      const isLoggedInAfterNavigation = !(await this.isLoginRequired(page));
+      if (isLoggedInAfterNavigation) {
+        this.logger.log('🎉 [START_LOGIN] User is already logged in after loading credentials!');
+        await page.close();
+        return { error: 'User is already logged in' };
+      }
+
+      // 等待二维码出现 - 使用多种选择器
+      const qrCodeSelectors = [
+        '//*[@id="app"]/div[1]/div/div[1]/div[2]/div[2]/div[2]/img',
+        '//img[contains(@alt, "二维码")]',
+        '//img[contains(@src, "qrcode")]',
+        '.qr-code img',
+        '.qrcode img',
+      ];
+      
+      let qrCodeElement: any = null;
+      let qrCodeUrl: string | null = null;
+
+      for (const selector of qrCodeSelectors) {
+        try {
+          this.logger.log(`Trying selector: ${selector}`);
+          
+          if (selector.startsWith('//')) {
+            // XPath selector
+            await page.waitForXPath(selector, { timeout: 5000 });
+            const elements = await page.$x(selector);
+            if (elements.length > 0) {
+              qrCodeElement = elements[0];
+              break;
+            }
+          } else {
+            // CSS selector
+            await page.waitForSelector(selector, { timeout: 5000 });
+            qrCodeElement = await page.$(selector);
+            if (qrCodeElement) {
+              break;
+            }
+          }
+        } catch (error) {
+          this.logger.warn(`Selector ${selector} not found, trying next...`);
+          continue;
+        }
+      }
+
+      if (qrCodeElement) {
+        try {
+          // 尝试获取二维码图片的 src 属性
+          qrCodeUrl = await page.evaluate((element: HTMLImageElement) => {
+            return element.src;
+          }, qrCodeElement);
+          
+          this.logger.log(`QR code URL extracted: ${qrCodeUrl ? 'Success' : 'Failed'}`);
+          
+          if (qrCodeUrl) {
+            // 创建新的会话
+            this.currentQrSession = {
+              page,
+              qrCodeUrl,
+              createdAt: new Date(),
+              isMonitoring: false,
+            };
+
+            // 标记监听已启动，但不进行任何自动操作
+            this.startLoginMonitoring();
+            
+            this.logger.log('New QR code session created successfully');
+            return { qrCodeUrl };
+          }
+        } catch (error) {
+          this.logger.error('Failed to extract QR code URL:', error);
+        }
+      }
+
+      // 如果没有找到二维码，尝试截图获取更多信息
+      try {
+        await page.screenshot({ 
+          path: 'debug-login-page.png',
+          fullPage: true 
+        });
+        this.logger.log('Debug screenshot saved as debug-login-page.png');
+      } catch (error) {
+        this.logger.warn('Could not save debug screenshot:', error);
+      }
+
+      await page.close();
+      return { error: '无法获取登录二维码，可能页面结构已变化' };
+
+    } catch (error) {
+      this.logger.error('Failed to start login process:', error);
+      await page.close();
+      return { error: error.message };
+    }
+  }
+
+  // 启动主动的登录监听，检测二维码弹窗消失
+  private async startLoginMonitoring(): Promise<void> {
+    if (!this.currentQrSession || this.currentQrSession.isMonitoring) {
+      this.logger.warn('Cannot start monitoring: no session or already monitoring');
+      return;
+    }
+
+    this.currentQrSession.isMonitoring = true;
+    this.logger.log('🔍 [LOGIN] Starting QR code login monitoring...');
+    this.logger.log('📱 [LOGIN] Please scan the QR code with Xiaohongshu app and confirm on your phone');
+    
+    // 启动后台监听任务
+    this.monitorQrCodeDisappearance();
+  }
+
+  // 监听二维码弹窗的消失，检测登录成功
+  private async monitorQrCodeDisappearance(): Promise<void> {
+    if (!this.currentQrSession) {
+      return;
+    }
+
+    const page = this.currentQrSession.page;
+    const timeout = this.configService.get<number>('XHS_LOGIN_TIMEOUT', 300000); // 5分钟超时
+    const startTime = Date.now();
+    const checkInterval = 5000; // 每5秒检查一次，给用户充足确认时间
+
+    this.logger.log('🔍 [LOGIN] Monitoring QR code popup disappearance...');
+
+    try {
+      let loginDetected = false;
+
+      while (Date.now() - startTime < timeout && !loginDetected && this.currentQrSession) {
+        try {
+          // 1. 检查二维码元素是否还存在
+          const qrCodeExists = await page.evaluate(() => {
+            const qrSelectors = [
+              'img[alt*="二维码"]',
+              'img[src*="qrcode"]', 
+              '.qr-code img',
+              '.qrcode img',
+              '[class*="qr"]',
+              '[class*="QR"]'
+            ];
+            
+            return qrSelectors.some(selector => {
+              const element = document.querySelector(selector) as HTMLElement;
+              return element && element.offsetParent !== null; // 检查元素是否可见
+            });
+          });
+
+          // 2. 检查登录弹窗/容器是否还存在
+          const loginModalExists = await page.evaluate(() => {
+            const modalSelectors = [
+              '.login-container',
+              '.signin-container', 
+              '[class*="login"]',
+              '[class*="signin"]',
+              '[class*="modal"]'
+            ];
+            
+            return modalSelectors.some(selector => {
+              const element = document.querySelector(selector) as HTMLElement;
+              return element && element.offsetParent !== null;
+            });
+          });
+
+          this.logger.log(`🔍 [LOGIN] QR Code exists: ${qrCodeExists}, Login modal exists: ${loginModalExists}`);
+
+          // 3. 如果二维码消失或登录弹窗消失，说明可能登录成功
+          if (!qrCodeExists || !loginModalExists) {
+            this.logger.log('🎉 [LOGIN] QR code popup disappeared! Waiting for user to confirm login...');
+            
+            // 给用户5秒时间点击确认登录
+            this.logger.log('⏳ [LOGIN] Waiting 5 seconds for user to confirm login on phone...');
+            await page.waitForTimeout(5000);
+            
+            // 验证登录是否真正成功
+            const loginSuccess = await this.validateLoginSuccess(page);
+            if (loginSuccess) {
+              loginDetected = true;
+              break;
+            } else {
+              this.logger.warn('⚠️ [LOGIN] User may still be confirming login, continuing monitoring...');
+            }
+          }
+
+          // 4. 检查URL是否发生变化（备用检测方法）
+          const currentUrl = page.url();
+          if (!currentUrl.includes('signin') && !currentUrl.includes('login') && currentUrl.includes('xiaohongshu.com')) {
+            this.logger.log('🌐 [LOGIN] Page URL changed, verifying login...');
+            const loginSuccess = await this.validateLoginSuccess(page);
+            if (loginSuccess) {
+              loginDetected = true;
+              break;
+            }
+          }
+
+          await page.waitForTimeout(checkInterval);
+
+        } catch (error) {
+          this.logger.warn(`⚠️ [LOGIN] Error during monitoring: ${error.message}`);
+          await page.waitForTimeout(checkInterval);
+        }
+      }
+
+      if (!loginDetected) {
+        if (Date.now() - startTime >= timeout) {
+          this.logger.warn('⏰ [LOGIN] QR code login monitoring timeout');
+        } else {
+          this.logger.warn('🛑 [LOGIN] QR code login monitoring stopped');
+        }
+      }
+
+    } catch (error) {
+      this.logger.error('❌ [LOGIN] QR code monitoring failed:', error);
+    }
+  }
+
+  // 验证登录是否真正成功，并保存凭证
+  private async validateLoginSuccess(page: Page): Promise<boolean> {
+    try {
+      this.logger.log('🔍 [LOGIN] Validating login success...');
+
+      // 1. 使用精确的XPath检测是否仍需要登录
+      const stillNeedsLogin = await this.isLoginRequired(page);
+      
+      if (stillNeedsLogin) {
+        this.logger.log('⚠️ [LOGIN] User still on login page, not logged in yet');
+        return false;
+      }
+
+      this.logger.log('✅ [LOGIN] Login page element not found - user appears to be logged in!');
+
+      // 2. 检查是否有有效的认证cookies
+      const cookies = await page.cookies();
+      this.logger.log(`🍪 [LOGIN] Found ${cookies.length} total cookies`);
+
+      if (cookies.length === 0) {
+        this.logger.warn('⚠️ [LOGIN] No cookies found, this may be an issue');
+        return false;
+      }
+
+      // 3. 保存所有凭证数据
+      await this.saveCredentials(page, cookies);
+
+      // 4. 使用新的页面验证登录状态
+      const isValid = await this.verifyLoginWithNewPage(cookies);
+      
+      if (isValid) {
+        this.logger.log('✅ [LOGIN] Login validation successful! Credentials saved.');
+        
+        const expireDate = new Date();
+        expireDate.setDate(expireDate.getDate() + this.COOKIE_EXPIRE_DAYS);
+        
+        await this.saveLoginStatus({
+          isLoggedIn: true,
+          lastChecked: new Date(),
+          cookiesExpireAt: expireDate,
+        });
+
+        // 清理会话
+        await this.cleanupQrSession();
+        
+        return true;
+      } else {
+        this.logger.warn('❌ [LOGIN] Login validation failed');
+        return false;
+      }
+
+    } catch (error) {
+      this.logger.error('❌ [LOGIN] Login validation error:', error);
+      return false;
+    }
+  }
+
+  // 手动检查当前会话的登录状态
+  async checkCurrentSessionLogin(): Promise<boolean> {
+    if (!this.currentQrSession) {
+      return false;
+    }
+
+    try {
+      // 简单检查页面是否还在登录页面
+      const currentUrl = this.currentQrSession.page.url();
+      const isStillOnLoginPage = currentUrl.includes('signin') || currentUrl.includes('login') || currentUrl.includes('explore');
+      
+      if (!isStillOnLoginPage) {
+        this.logger.log('Page URL changed, user may have logged in');
+        
+        // 获取并保存 cookies
+        const cookies = await this.currentQrSession.page.cookies();
+        if (cookies.length > 0) {
+          await this.saveCookiesToRedis(cookies);
+          this.logger.log(`Saved ${cookies.length} cookies after login`);
+        }
+
+        // 更新登录状态
+        const expireDate = new Date();
+        expireDate.setDate(expireDate.getDate() + this.COOKIE_EXPIRE_DAYS);
+        
+        await this.saveLoginStatus({
+          isLoggedIn: true,
+          lastChecked: new Date(),
+          cookiesExpireAt: expireDate,
+        });
+
+        // 清理会话
+        await this.cleanupQrSession();
+        
+        return true;
+      }
+      
+      return false;
+    } catch (error) {
+      this.logger.error('Error checking session login:', error);
+      return false;
+    }
+  }
+
+  private async monitorLoginSuccess(page: Page): Promise<void> {
+    const timeout = this.configService.get<number>('XHS_LOGIN_TIMEOUT', 120000); // 增加到2分钟
+    const startTime = Date.now();
+    
+    this.logger.log('Starting login monitoring...');
+    
+    try {
+      // 使用轮询方式检查登录状态，更加可靠
+      const checkInterval = 3000; // 每3秒检查一次
+      let loginSuccessful = false;
+      
+      while (Date.now() - startTime < timeout && !loginSuccessful) {
+        try {
+          // 检查是否还在登录页面
+          const currentUrl = page.url();
+          this.logger.log(`Current URL: ${currentUrl}`);
+          
+          // 如果URL发生变化，可能表示登录成功
+          if (!currentUrl.includes('signin') && !currentUrl.includes('login')) {
+            this.logger.log('URL changed, checking login status...');
+            
+            // 等待页面稳定
+            await page.waitForTimeout(2000);
+            
+            // 获取并保存cookies
+            const cookies = await page.cookies();
+            if (cookies.length > 0) {
+              await this.saveCookiesToRedis(cookies);
+              this.logger.log(`Saved ${cookies.length} cookies to Redis`);
+            }
+            
+            // 使用单独的页面验证登录状态，避免影响当前页面
+            const isLoggedIn = await this.checkLoginStatus();
+            
+            if (isLoggedIn) {
+              this.logger.log('✅ Login successful! Cookies saved.');
+              
+              const expireDate = new Date();
+              expireDate.setDate(expireDate.getDate() + this.COOKIE_EXPIRE_DAYS);
+              
+              await this.saveLoginStatus({
+                isLoggedIn: true,
+                lastChecked: new Date(),
+                cookiesExpireAt: expireDate,
+              });
+              
+              loginSuccessful = true;
+              break;
+            }
+          }
+          
+          // 检查二维码是否还存在
+          const qrCodeExists = await page.evaluate(() => {
+            const qrSelectors = [
+              'img[alt*="二维码"]',
+              'img[src*="qrcode"]',
+              '.qr-code img',
+              '.qrcode img'
+            ];
+            
+            return qrSelectors.some(selector => 
+              document.querySelector(selector) !== null
+            );
+          });
+          
+          if (!qrCodeExists) {
+            this.logger.log('QR code disappeared, login might be successful');
+            await page.waitForTimeout(2000); // 等待页面稳定
+            continue; // 继续检查登录状态
+          }
+          
+          // 等待下次检查
+          await page.waitForTimeout(checkInterval);
+          
+        } catch (error) {
+          this.logger.warn('Error during login monitoring:', error);
+          await page.waitForTimeout(checkInterval);
+        }
+      }
+      
+      if (!loginSuccessful) {
+        this.logger.warn('Login monitoring timeout, login may have failed');
+      }
+
+    } catch (error) {
+      this.logger.error('Login monitoring failed:', error);
+    } finally {
+      // 不在这里关闭页面，由 cleanupQrSession 统一处理
+      this.logger.log('Login monitoring completed');
+    }
+  }
+
+  async getAuthenticatedPage(): Promise<Page | null> {
+    // 先检查登录状态
+    this.logger.log('🔍 [AUTH_PAGE] Checking login status before creating authenticated page...');
+    const isLoggedIn = await this.checkLoginStatus();
+    
+    if (!isLoggedIn) {
+      this.logger.warn('❌ [AUTH_PAGE] Not logged in, cannot create authenticated page');
+      return null;
+    }
+
+    const page = await this.browserService.createPage();
+    
+    try {
+      this.logger.log('🔄 [AUTH_PAGE] Creating authenticated page with saved credentials...');
+      
+      // 加载所有保存的凭证
+      const credentialsLoaded = await this.loadSavedCredentials(page);
+      if (!credentialsLoaded) {
+        this.logger.warn('⚠️ [AUTH_PAGE] Failed to load credentials, page may not be properly authenticated');
+      }
+
+      this.logger.log('✅ [AUTH_PAGE] Authenticated page created successfully');
+      return page;
+    } catch (error) {
+      this.logger.error('❌ [AUTH_PAGE] Failed to create authenticated page:', error);
+      await page.close();
+      return null;
+    }
+  }
+
+  // 添加一个方法来强制重新登录（清除cookies）
+  async forceRelogin(): Promise<void> {
+    try {
+      // 清理当前会话
+      await this.cleanupQrSession();
+      
+      await this.clearCookiesFromRedis();
+      await this.saveLoginStatus({
+        isLoggedIn: false,
+        lastChecked: new Date(),
+      });
+      this.logger.log('Forced logout completed, cookies cleared');
+    } catch (error) {
+      this.logger.error('Failed to force relogin:', error);
+    }
+  }
+
+  // 增强的凭证保存方法，保存cookies和storage数据
+  private async saveCredentials(page: Page, cookies: any[]): Promise<void> {
+    try {
+      this.logger.log('💾 [SAVE] Starting credential save process...');
+
+      // 1. 保存cookies到Redis
+      const validCookies = cookies.filter(cookie => cookie.name && cookie.value);
+      await this.saveCookiesToRedis(validCookies);
+      
+      this.logger.log(`💾 [SAVE] Cookies saved: ${validCookies.length} total`);
+      validCookies.forEach(cookie => {
+        this.logger.log(`  🍪 ${cookie.name}: ${cookie.value.substring(0, 20)}... (domain: ${cookie.domain})`);
+      });
+
+      // 2. 获取并保存localStorage数据
+      const localStorage = await page.evaluate(() => {
+        const storage = {};
+        for (let i = 0; i < window.localStorage.length; i++) {
+          const key = window.localStorage.key(i);
+          if (key) {
+            storage[key] = window.localStorage.getItem(key);
+          }
+        }
+        return storage;
+      });
+
+      if (Object.keys(localStorage).length > 0) {
+        await this.redis.setex('xiaohongshu:localStorage', 3600 * 24 * this.COOKIE_EXPIRE_DAYS, JSON.stringify(localStorage));
+        this.logger.log(`💾 [SAVE] LocalStorage saved: ${Object.keys(localStorage).length} items`);
+        Object.keys(localStorage).forEach(key => {
+          const value = localStorage[key];
+          this.logger.log(`  🗃️ ${key}: ${value ? value.substring(0, 30) + '...' : 'null'}`);
+        });
+      }
+
+      // 3. 获取并保存sessionStorage数据
+      const sessionStorage = await page.evaluate(() => {
+        const storage = {};
+        for (let i = 0; i < window.sessionStorage.length; i++) {
+          const key = window.sessionStorage.key(i);
+          if (key) {
+            storage[key] = window.sessionStorage.getItem(key);
+          }
+        }
+        return storage;
+      });
+
+      if (Object.keys(sessionStorage).length > 0) {
+        await this.redis.setex('xiaohongshu:sessionStorage', 3600 * 24 * this.COOKIE_EXPIRE_DAYS, JSON.stringify(sessionStorage));
+        this.logger.log(`💾 [SAVE] SessionStorage saved: ${Object.keys(sessionStorage).length} items`);
+        Object.keys(sessionStorage).forEach(key => {
+          const value = sessionStorage[key];
+          this.logger.log(`  📦 ${key}: ${value ? value.substring(0, 30) + '...' : 'null'}`);
+        });
+      }
+
+      // 4. 保存页面的基本信息
+      const pageInfo = {
+        url: page.url(),
+        title: await page.title(),
+        userAgent: await page.evaluate(() => navigator.userAgent),
+        timestamp: new Date().toISOString()
+      };
+      
+      await this.redis.setex('xiaohongshu:pageInfo', 3600 * 24 * this.COOKIE_EXPIRE_DAYS, JSON.stringify(pageInfo));
+      this.logger.log(`💾 [SAVE] Page info saved: ${pageInfo.title} (${pageInfo.url})`);
+
+      this.logger.log('✅ [SAVE] All credentials saved successfully to Redis!');
+      this.logger.log(`🕒 [SAVE] Credentials will expire in ${this.COOKIE_EXPIRE_DAYS} days`);
+
+    } catch (error) {
+      this.logger.error('❌ [SAVE] Failed to save credentials:', error);
+      throw error;
+    }
+  }
+
+  // 使用新页面验证登录状态
+  private async verifyLoginWithNewPage(cookies: any[]): Promise<boolean> {
+    let testPage: Page | null = null;
+    
+    try {
+      this.logger.log('🔍 [VERIFY] Creating test page to verify login...');
+      testPage = await this.browserService.createPage();
+      
+      // 设置cookies
+      await testPage.setCookie(...cookies);
+      this.logger.log(`🔍 [VERIFY] Applied ${cookies.length} cookies to test page`);
+      
+      // 访问需要登录的页面
+      await testPage.goto(this.XHS_LOGIN_URL, { waitUntil: 'networkidle2', timeout: 30000 });
+      await testPage.waitForTimeout(2000);
+      
+      // 使用精确的XPath检查是否仍需要登录
+      const needsLogin = await this.isLoginRequired(testPage);
+      
+      this.logger.log(`🔍 [VERIFY] Login verification result: ${needsLogin ? 'FAILED - still needs login' : 'SUCCESS - logged in'}`);
+      
+      return !needsLogin;
+      
+    } catch (error) {
+      this.logger.error('❌ [VERIFY] Login verification failed:', error);
+      return false;
+    } finally {
+      if (testPage) {
+        await testPage.close();
+        this.logger.log('🔍 [VERIFY] Test page closed');
+      }
+    }
+  }
+
+  // 加载保存的凭证到页面
+  private async loadSavedCredentials(page: Page): Promise<boolean> {
+    try {
+      this.logger.log('🔄 [LOAD] Loading saved credentials...');
+
+      // 1. 加载cookies
+      const cookies = await this.loadCookiesFromRedis();
+      if (cookies && cookies.length > 0) {
+        await page.setCookie(...cookies);
+        this.logger.log(`🔄 [LOAD] Loaded ${cookies.length} cookies`);
+      }
+
+      // 2. 加载localStorage
+      try {
+        const localStorageStr = await this.redis.get('xiaohongshu:localStorage');
+        if (localStorageStr && typeof localStorageStr === 'string') {
+          const localStorage = JSON.parse(localStorageStr);
+          await page.evaluateOnNewDocument((storage) => {
+            for (const [key, value] of Object.entries(storage)) {
+              window.localStorage.setItem(key, value as string);
+            }
+          }, localStorage);
+          this.logger.log(`🔄 [LOAD] Loaded ${Object.keys(localStorage).length} localStorage items`);
+        }
+      } catch (error) {
+        this.logger.warn('⚠️ [LOAD] Failed to load localStorage:', error);
+      }
+
+      // 3. 加载sessionStorage  
+      try {
+        const sessionStorageStr = await this.redis.get('xiaohongshu:sessionStorage');
+        if (sessionStorageStr && typeof sessionStorageStr === 'string') {
+          const sessionStorage = JSON.parse(sessionStorageStr);
+          await page.evaluateOnNewDocument((storage) => {
+            for (const [key, value] of Object.entries(storage)) {
+              window.sessionStorage.setItem(key, value as string);
+            }
+          }, sessionStorage);
+          this.logger.log(`🔄 [LOAD] Loaded ${Object.keys(sessionStorage).length} sessionStorage items`);
+        }
+      } catch (error) {
+        this.logger.warn('⚠️ [LOAD] Failed to load sessionStorage:', error);
+      }
+
+      this.logger.log('✅ [LOAD] All saved credentials loaded successfully');
+      return true;
+
+    } catch (error) {
+      this.logger.error('❌ [LOAD] Failed to load saved credentials:', error);
+      return false;
+    }
+  }
+
+  // 清理所有认证相关的 Redis 数据
+  async clearAllAuthData(): Promise<void> {
+    try {
+      await this.redis.del(this.REDIS_KEY);
+      await this.redis.del(this.COOKIES_KEY);
+      await this.redis.del('xiaohongshu:localStorage');
+      await this.redis.del('xiaohongshu:sessionStorage');
+      await this.redis.del('xiaohongshu:pageInfo');
+      this.logger.log('🗑️ [CLEAR] Cleared all authentication data from Redis');
+    } catch (error) {
+      this.logger.error('❌ [CLEAR] Failed to clear auth data from Redis:', error);
+    }
+  }
+
+  // 检查当前二维码会话是否有效
+  private isQrSessionValid(): boolean {
+    if (!this.currentQrSession) {
+      return false;
+    }
+
+    // 检查页面是否仍然存活
+    if (this.currentQrSession.page.isClosed()) {
+      this.logger.log('QR session invalid: page is closed');
+      this.currentQrSession = null;
+      return false;
+    }
+
+    // 检查二维码是否过期
+    const now = new Date();
+    const elapsed = now.getTime() - this.currentQrSession.createdAt.getTime();
+    if (elapsed > this.QR_CODE_EXPIRE_TIME) {
+      this.logger.log('QR session invalid: expired');
+      return false;
+    }
+
+    return true;
+  }
+
+  // 精确检测是否需要登录（使用特定XPath）
+  private async isLoginRequired(page: Page): Promise<boolean> {
+    try {
+      // 检查登录界面特有的元素是否存在
+      const loginElements = await page.$x(this.LOGIN_CHECK_XPATH);
+      
+      if (loginElements.length > 0) {
+        // 进一步验证元素内容是否包含"手机号登录"
+        const elementText = await page.evaluate((element) => {
+          return element ? element.textContent || '' : '';
+        }, loginElements[0]);
+        
+        const isLoginPage = elementText.includes('手机号登录');
+        this.logger.log(`🔍 [LOGIN_CHECK] Login element found: ${loginElements.length > 0}, Text: "${elementText}", Is login page: ${isLoginPage}`);
+        
+        return isLoginPage;
+      } else {
+        this.logger.log('🔍 [LOGIN_CHECK] Login element not found - user appears to be logged in');
+        return false;
+      }
+    } catch (error) {
+      this.logger.warn('⚠️ [LOGIN_CHECK] Error checking login status:', error);
+      return true; // 出错时假设需要登录，安全处理
+    }
+  }
+
+  // 清理当前二维码会话
+  private async cleanupQrSession(): Promise<void> {
+    if (this.currentQrSession) {
+      try {
+        if (!this.currentQrSession.page.isClosed()) {
+          await this.currentQrSession.page.close();
+        }
+      } catch (error) {
+        this.logger.warn('Error closing QR session page:', error);
+      }
+      this.currentQrSession = null;
+      this.logger.log('QR session cleaned up');
+    }
+  }
+}
