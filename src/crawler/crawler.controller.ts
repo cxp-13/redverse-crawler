@@ -6,26 +6,26 @@ export class CrawlerController {
   constructor(private crawlerService: CrawlerService) {}
 
   @Post('crawl')
-  async crawlNote(@Body() body: { url: string }) {
-    const { url } = body;
+  async crawlNote(@Body() body: { appName: string }) {
+    const { appName } = body;
 
-    if (!url) {
+    if (!appName) {
       throw new HttpException({
         success: false,
-        message: 'URL参数不能为空',
+        message: '应用名称参数不能为空',
       }, HttpStatus.BAD_REQUEST);
     }
 
-    const isValidUrl = await this.crawlerService.validateUrl(url);
-    if (!isValidUrl) {
+    const isValidAppName = this.crawlerService.validateAppName(appName);
+    if (!isValidAppName) {
       throw new HttpException({
         success: false,
-        message: '无效的小红书链接',
+        message: '无效的应用名称',
       }, HttpStatus.BAD_REQUEST);
     }
 
     try {
-      const result = await this.crawlerService.crawlNoteData(url);
+      const result = await this.crawlerService.crawlNoteDataByAppName(appName);
       return {
         success: result.success,
         message: result.success ? '爬取成功' : '爬取失败',

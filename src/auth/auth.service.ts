@@ -24,15 +24,14 @@ export interface PhoneLoginConfig {
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
-  private readonly XHS_LOGIN_URL = 'https://www.xiaohongshu.com/explore';
-  private readonly LOGIN_CHECK_XPATH = '//*[@id="app"]/div[1]/div/div[1]/div[3]/div[1]'; // 登录界面特有元素
+  private readonly XHS_LOGIN_URL = 'https://creator.xiaohongshu.com/';
+  private readonly XHS_NOTE_MANAGER_URL = 'https://creator.xiaohongshu.com/new/note-manager';
   
-  // 手机号登录相关XPath
-  private readonly PHONE_INPUT_XPATH = '//*[@id="app"]/div[1]/div/div[1]/div[3]/div[2]/form/label[1]/input';
-  private readonly GET_CODE_BUTTON_XPATH = '//*[@id="app"]/div[1]/div/div[1]/div[3]/div[2]/form/label[2]/span';
-  private readonly SMS_CODE_INPUT_XPATH = '//*[@id="app"]/div[1]/div/div[1]/div[3]/div[2]/form/label[2]/input';
-  private readonly AGREE_CHECKBOX_XPATH = '//*[@id="app"]/div[1]/div/div[1]/div[3]/div[3]/span/div';
-  private readonly LOGIN_BUTTON_XPATH = '//*[@id="app"]/div[1]/div/div[1]/div[3]/div[2]/form/button';
+  // 创作者后台登录相关XPath
+  private readonly PHONE_INPUT_XPATH = '//*[@id="page"]/div/div[2]/div[1]/div[2]/div/div/div/div/div/div[2]/div[1]/div[1]/input';
+  private readonly GET_CODE_BUTTON_XPATH = '//*[@id="page"]/div/div[2]/div[1]/div[2]/div/div/div/div/div/div[2]/div[1]/div[2]/div/div/div[2]';
+  private readonly SMS_CODE_INPUT_XPATH = '//*[@id="page"]/div/div[2]/div[1]/div[2]/div/div/div/div/div/div[2]/div[1]/div[2]/input';
+  private readonly LOGIN_BUTTON_XPATH = '//*[@id="page"]/div/div[2]/div[1]/div[2]/div/div/div/div/div/button';
   
   // 状态管理
   private systemStatus: LoginStatus = {
@@ -129,19 +128,13 @@ export class AuthService {
       this.currentSession.phoneNumber = phoneNumber;
       this.currentSession.startTime = Date.now();
 
-      // 导航到登录页面
-      this.logger.log('Navigating to Xiaohongshu login page...');
+      // 导航到创作者后台登录页面
+      this.logger.log('Navigating to Xiaohongshu Creator Center login page...');
       await page.goto(this.XHS_LOGIN_URL, { waitUntil: 'networkidle2', timeout: 30000 });
       await page.waitForTimeout(3000);
 
-      // 切换到手机号登录模式
-      await this.switchToPhoneLogin(page);
-
       // 输入手机号
       await this.inputPhoneNumber(page, phoneNumber);
-
-      // 点击同意协议
-      await this.agreeToTerms(page);
 
       // 获取验证码
       await this.requestSmsCode(page);
@@ -196,22 +189,6 @@ export class AuthService {
     }
   }
 
-  // 切换到手机号登录模式
-  private async switchToPhoneLogin(page: Page): Promise<void> {
-    try {
-      // 寻找手机号登录切换按钮（通常在二维码登录旁边）
-      const phoneLoginButton = await page.$x('//span[contains(text(), "手机号登录")]');
-      if (phoneLoginButton.length > 0) {
-        await (phoneLoginButton[0] as any).click();
-        await page.waitForTimeout(2000);
-        this.logger.log('Switched to phone login mode');
-      } else {
-        this.logger.log('Already in phone login mode or button not found');
-      }
-    } catch (error) {
-      this.logger.warn('Could not switch to phone login mode:', error);
-    }
-  }
 
   // 输入手机号
   private async inputPhoneNumber(page: Page, phoneNumber: string): Promise<void> {
@@ -235,19 +212,6 @@ export class AuthService {
     this.logger.log(`Phone number entered: ${phoneNumber}`);
   }
 
-  // 勾选同意协议
-  private async agreeToTerms(page: Page): Promise<void> {
-    try {
-      const checkbox = await page.$x(this.AGREE_CHECKBOX_XPATH);
-      if (checkbox.length > 0) {
-        await (checkbox[0] as any).click();
-        await page.waitForTimeout(500);
-        this.logger.log('Terms agreement checked');
-      }
-    } catch (error) {
-      this.logger.warn('Could not check terms agreement:', error);
-    }
-  }
 
   // 请求短信验证码
   private async requestSmsCode(page: Page): Promise<void> {
@@ -346,25 +310,31 @@ export class AuthService {
     }, checkInterval);
   }
 
-  // 检查登录状态
+  // 检查登录状态 - 适配创作者后台
   private async checkLoginStatus(page: Page): Promise<boolean> {
     try {
-      // 检查登录界面特有元素是否存在
-      const loginElements = await page.$x(this.LOGIN_CHECK_XPATH);
+      const currentUrl = page.url();
       
-      if (loginElements.length > 0) {
-        const elementText = await page.evaluate((element) => {
-          return element ? element.textContent || '' : '';
-        }, loginElements[0]);
-        
-        // 如果还能找到"手机号登录"元素，说明还在登录页面
-        return !elementText.includes('手机号登录');
+      // 如果URL包含创作者后台的路径，说明已经登录成功
+      if (currentUrl.includes('creator.xiaohongshu.com') && 
+          (currentUrl.includes('/new/') || currentUrl.includes('/dashboard') || currentUrl.includes('/note-manager'))) {
+        this.logger.log(`Login successful, redirected to: ${currentUrl}`);
+        return true;
       }
       
-      // 找不到登录元素，说明已经登录
+      // 检查是否还在登录页面
+      if (currentUrl.includes('creator.xiaohongshu.com') && !currentUrl.includes('/new/')) {
+        // 检查页面是否包含登录表单元素
+        const phoneInput = await page.$x(this.PHONE_INPUT_XPATH);
+        if (phoneInput.length > 0) {
+          // 还在登录页面
+          return false;
+        }
+      }
+      
       return true;
     } catch (error) {
-      this.logger.warn('Error checking login element:', error);
+      this.logger.warn('Error checking login status:', error);
       return false;
     }
   }
@@ -431,9 +401,9 @@ export class AuthService {
       }
     }
 
-    // 创建新的认证页面
+    // 创建新的认证页面，直接导航到笔记管理页面
     const page = await this.browserService.createPage();
-    await page.goto(this.XHS_LOGIN_URL, { waitUntil: 'networkidle2', timeout: 30000 });
+    await page.goto(this.XHS_NOTE_MANAGER_URL, { waitUntil: 'networkidle2', timeout: 30000 });
     
     // 验证是否仍然处于登录状态
     const isLoggedIn = await this.checkLoginStatus(page);
@@ -445,7 +415,7 @@ export class AuthService {
 
     // 缓存页面供复用
     this.authenticatedPage = page;
-    this.logger.log('Created new authenticated page for reuse');
+    this.logger.log('Created new authenticated page for note manager');
     return page;
   }
 

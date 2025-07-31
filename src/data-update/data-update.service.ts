@@ -63,10 +63,10 @@ export class DataUpdateService {
         },
       });
 
-      // 从Supabase获取所有notes
-      const notes = await this.fetchAllNotes();
-      if (!notes || notes.length === 0) {
-        this.logger.warn('No notes found to update');
+      // 获取所有应用和对应的笔记
+      const appsWithNotes = await this.fetchAllApplicationsWithNotes();
+      if (!appsWithNotes || appsWithNotes.length === 0) {
+        this.logger.warn('No applications with notes found to update');
         await this.authService.updateSystemStatus({
           updateStatus: 'completed',
           lastUpdate: new Date(),
@@ -76,56 +76,89 @@ export class DataUpdateService {
         return;
       }
 
+      // 计算总笔记数
+      const totalNotes = appsWithNotes.reduce((sum, item) => sum + item.notes.length, 0);
+
       // 更新总数
       await this.authService.updateSystemStatus({
         progress: {
-          total: notes.length,
+          total: totalNotes,
           processed: 0,
           failed: 0,
         },
       });
 
-      this.logger.log(`📊 Found ${notes.length} notes to update`);
+      this.logger.log(`📊 Found ${appsWithNotes.length} applications with ${totalNotes} total notes to update`);
 
-      // 逐个更新notes
+      // 逐个应用处理
       let processed = 0;
       let failed = 0;
 
-      for (const note of notes) {
+      for (const appWithNotes of appsWithNotes) {
+        const { application, notes } = appWithNotes;
+        
+        this.logger.log(`🔄 Processing application: "${application.name}" with ${notes.length} notes`);
+
         try {
-          this.logger.log(`📝 Updating note ${processed + 1}/${notes.length}: ${note.url}`);
-          
-          // 爬取最新数据
-          const result = await this.crawlerService.crawlNoteData(note.url);
+          // 通过应用名称搜索获取最新数据
+          const result = await this.crawlerService.crawlNoteDataByAppName(application.name);
           
           if (result.success && result.data) {
-            // 更新到Supabase并发送邮件通知
-            await this.updateNoteWithEmailNotification(note, result.data);
-            processed++;
-            this.logger.log(`✅ Successfully updated note: ${note.id}`);
+            // 更新所有关联的笔记
+            for (const note of notes) {
+              try {
+                await this.updateNoteWithEmailNotification(note, result.data);
+                processed++;
+                this.logger.log(`✅ Successfully updated note: ${note.id} for app "${application.name}"`);
+              } catch (error) {
+                failed++;
+                this.logger.error(`❌ Error updating note ${note.id}:`, error);
+              }
+
+              // 更新进度
+              await this.authService.updateSystemStatus({
+                progress: {
+                  total: totalNotes,
+                  processed: processed,
+                  failed: failed,
+                },
+              });
+            }
           } else {
-            failed++;
-            this.logger.error(`❌ Failed to crawl note: ${note.url} - ${result.error}`);
+            // 如果搜索失败，所有相关笔记都标记为失败
+            failed += notes.length;
+            processed += notes.length; // 仍然计入已处理，避免卡住
+            this.logger.error(`❌ Failed to get data for app "${application.name}": ${result.error}`);
+            
+            // 更新进度
+            await this.authService.updateSystemStatus({
+              progress: {
+                total: totalNotes,
+                processed: processed,
+                failed: failed,
+              },
+            });
           }
         } catch (error) {
-          failed++;
-          this.logger.error(`❌ Error updating note ${note.id}:`, error);
+          failed += notes.length;
+          processed += notes.length;
+          this.logger.error(`❌ Error processing app "${application.name}":`, error);
+          
+          // 更新进度
+          await this.authService.updateSystemStatus({
+            progress: {
+              total: totalNotes,
+              processed: processed,
+              failed: failed,
+            },
+          });
         }
 
-        // 更新进度
-        await this.authService.updateSystemStatus({
-          progress: {
-            total: notes.length,
-            processed: processed,
-            failed: failed,
-          },
-        });
-
         // 添加进度更新调试日志
-        this.logger.log(`📊 [Debug] Progress updated: ${processed}/${notes.length} (failed: ${failed}) at ${new Date().toLocaleTimeString()}`);
+        this.logger.log(`📊 Progress: ${processed}/${totalNotes} (failed: ${failed}) at ${new Date().toLocaleTimeString()}`);
 
         // 避免请求过快，添加延迟
-        await this.delay(2000);
+        await this.delay(3000);
       }
 
       // 更新完成
@@ -150,23 +183,50 @@ export class DataUpdateService {
     }
   }
 
-  // 从Supabase获取所有notes
-  private async fetchAllNotes(): Promise<Note[] | null> {
+  // 获取所有应用和对应的笔记数据
+  private async fetchAllApplicationsWithNotes(): Promise<Array<{application: Application, notes: Note[]}> | null> {
     try {
       const supabase = this.supabaseService.getClient();
-      const { data, error } = await supabase
-        .from('note')
-        .select('id, url, app_id, likes_count, collects_count, comments_count, views_count, shares_count')
-        .order('created_at', { ascending: false });
+      
+      // 获取所有应用
+      const { data: applications, error: appError } = await supabase
+        .from('application')
+        .select('id, name, user_id');
 
-      if (error) {
-        this.logger.error('Failed to fetch notes from Supabase:', error);
+      if (appError) {
+        this.logger.error('Failed to fetch applications from Supabase:', appError);
         return null;
       }
 
-      return data as Note[];
+      if (!applications || applications.length === 0) {
+        this.logger.warn('No applications found');
+        return [];
+      }
+
+      // 为每个应用获取对应的笔记
+      const result: Array<{application: Application, notes: Note[]}> = [];
+      for (const app of applications) {
+        const { data: notes, error: noteError } = await supabase
+          .from('note')
+          .select('id, url, app_id, likes_count, collects_count, comments_count, views_count, shares_count')
+          .eq('app_id', app.id);
+
+        if (noteError) {
+          this.logger.error(`Failed to fetch notes for app ${app.id}:`, noteError);
+          continue;
+        }
+
+        if (notes && notes.length > 0) {
+          result.push({
+            application: app as Application,
+            notes: notes as Note[]
+          });
+        }
+      }
+
+      return result;
     } catch (error) {
-      this.logger.error('Error fetching notes:', error);
+      this.logger.error('Error fetching applications with notes:', error);
       return null;
     }
   }
