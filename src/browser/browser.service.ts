@@ -4,6 +4,7 @@ import puppeteer from 'puppeteer-extra';
 import { Browser, Page } from 'puppeteer';
 
 // 导入 stealth 插件
+// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-unsafe-assignment
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 
 @Injectable()
@@ -13,6 +14,7 @@ export class BrowserService {
 
   constructor(private configService: ConfigService) {
     // 添加 stealth 插件
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument, @typescript-eslint/no-unsafe-call
     puppeteer.use(StealthPlugin());
   }
 

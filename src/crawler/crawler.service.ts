@@ -39,7 +39,7 @@ export class CrawlerService {
     private configService: ConfigService,
   ) {}
 
-  // 新方法：通过应用名称搜索笔记数据
+  // 新方法：通过应用名称搜索笔记数据（支持递归搜索）
   async crawlNoteDataByAppName(appName: string): Promise<CrawlResult> {
     const page = await this.authService.getAuthenticatedPage();
 
@@ -63,28 +63,20 @@ export class CrawlerService {
         await page.waitForTimeout(2000);
       }
 
-      // 搜索应用名称并监听API响应
-      const noteData = await this.searchAndCaptureNoteData(page, appName);
+      // 使用递归搜索策略
+      const result = await this.recursiveSearch(page, appName);
 
-      if (!noteData) {
-        return {
-          success: false,
-          error: `未找到应用 "${appName}" 对应的笔记数据`,
-        };
+      if (!result.success) {
+        return result;
       }
 
-      this.logger.log(`✅ 成功获取应用 "${appName}" 的笔记数据`);
+      this.logger.log(
+        `✅ 成功获取应用 "${appName}" 的笔记数据 (使用搜索词: "${result.usedSearchTerm}")`,
+      );
 
       return {
         success: true,
-        data: {
-          likes_count: noteData.likes || 0,
-          collects_count: noteData.collected_count || 0,
-          comments_count: noteData.comments_count || 0,
-          views_count: noteData.view_count || 0,
-          shares_count: noteData.shared_count || 0,
-          title: noteData.display_title,
-        },
+        data: result.data,
       };
     } catch (error) {
       this.logger.error(`Failed to search note for app ${appName}:`, error);
@@ -101,6 +93,95 @@ export class CrawlerService {
       success: false,
       error: '此方法已弃用，请使用 crawlNoteDataByAppName',
     });
+  }
+
+  // 递归搜索策略：从完整应用名开始，逐步减少字符直到找到结果
+  private async recursiveSearch(
+    page: Page,
+    originalAppName: string,
+  ): Promise<{
+    success: boolean;
+    data?: {
+      likes_count: number;
+      collects_count: number;
+      comments_count: number;
+      views_count: number;
+      shares_count: number;
+      title?: string;
+    };
+    error?: string;
+    usedSearchTerm?: string;
+  }> {
+    const appName = originalAppName.trim();
+
+    // 动态计算最小搜索长度：中文字符最少1个，英文字符最少2个
+    const minSearchLength = this.containsChinese(appName) ? 1 : 2;
+
+    this.logger.log(
+      `🎯 开始递归搜索应用 "${originalAppName}"，最小搜索长度: ${minSearchLength}`,
+    );
+
+    const searchAttempts: string[] = [];
+
+    for (let length = appName.length; length >= minSearchLength; length--) {
+      const searchTerm = appName.substring(0, length);
+      searchAttempts.push(searchTerm);
+
+      this.logger.log(
+        `🔍 尝试搜索词: "${searchTerm}" (长度: ${length}/${appName.length})`,
+      );
+
+      try {
+        const noteData = await this.searchAndCaptureNoteData(page, searchTerm);
+
+        if (noteData) {
+          this.logger.log(
+            `✅ 搜索成功！使用搜索词: "${searchTerm}"，找到笔记数据`,
+          );
+          this.logger.log(
+            `📊 数据预览: 赞=${noteData.likes}, 收藏=${noteData.collected_count}, 浏览=${noteData.view_count}`,
+          );
+
+          return {
+            success: true,
+            data: {
+              likes_count: noteData.likes || 0,
+              collects_count: noteData.collected_count || 0,
+              comments_count: noteData.comments_count || 0,
+              views_count: noteData.view_count || 0,
+              shares_count: noteData.shared_count || 0,
+              title: noteData.display_title,
+            },
+            usedSearchTerm: searchTerm,
+          };
+        } else {
+          this.logger.warn(
+            `⚠️ 搜索词 "${searchTerm}" 无结果，继续尝试更短的搜索词...`,
+          );
+        }
+      } catch (error) {
+        this.logger.error(`搜索词 "${searchTerm}" 时发生错误:`, error);
+        // 继续尝试下一个更短的搜索词
+        continue;
+      }
+
+      // 为了避免频繁请求，在每次尝试之间稍作延迟
+      await page.waitForTimeout(1500);
+    }
+
+    this.logger.error(
+      `❌ 递归搜索失败，已尝试的搜索词: [${searchAttempts.join(', ')}]`,
+    );
+
+    return {
+      success: false,
+      error: `应用 "${originalAppName}" 的所有搜索尝试都失败了（尝试了 ${searchAttempts.length} 个搜索词: ${searchAttempts.join(', ')}）`,
+    };
+  }
+
+  // 检查字符串是否包含中文字符
+  private containsChinese(text: string): boolean {
+    return /[\u4e00-\u9fff]/.test(text);
   }
 
   // 搜索应用名称并捕获API响应数据
@@ -181,6 +262,7 @@ export class CrawlerService {
         }
       };
 
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
       page.on('response', responseHandler as any);
 
       // 清空搜索框
@@ -193,7 +275,14 @@ export class CrawlerService {
       await page.waitForTimeout(3000);
 
       // 移除事件监听器
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
       page.off('response', responseHandler as any);
+
+      if (capturedData) {
+        this.logger.debug(`🎯 搜索词 "${appName}" 成功捕获数据`);
+      } else {
+        this.logger.debug(`❌ 搜索词 "${appName}" 未捕获到任何数据`);
+      }
 
       return capturedData;
     } catch (error) {
