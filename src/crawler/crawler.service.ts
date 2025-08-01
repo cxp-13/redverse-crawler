@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Page } from 'puppeteer';
+import { Page, ElementHandle } from 'puppeteer';
 import { AuthService } from '../auth/auth.service';
 
 interface CrawlResult {
@@ -29,8 +29,10 @@ interface CreatorNoteData {
 @Injectable()
 export class CrawlerService {
   private readonly logger = new Logger(CrawlerService.name);
-  private readonly SEARCH_INPUT_XPATH = '//*[@id="content-area"]/main/div[3]/div/div/div[1]/div/div/input';
-  private readonly API_URL_PATTERN = 'https://edith.xiaohongshu.com/web_api/sns/v5/creator/note/managemaent/search';
+  private readonly SEARCH_INPUT_XPATH =
+    '//*[@id="content-area"]/main/div[3]/div/div/div[1]/div/div/input';
+  private readonly API_URL_PATTERN =
+    'https://edith.xiaohongshu.com/web_api/sns/v5/creator/note/managemaent/search';
 
   constructor(
     private authService: AuthService,
@@ -40,7 +42,7 @@ export class CrawlerService {
   // 新方法：通过应用名称搜索笔记数据
   async crawlNoteDataByAppName(appName: string): Promise<CrawlResult> {
     const page = await this.authService.getAuthenticatedPage();
-    
+
     if (!page) {
       return {
         success: false,
@@ -49,12 +51,15 @@ export class CrawlerService {
     }
 
     try {
-      this.logger.log(`Starting to search note for app: ${appName}`);
-      
+      this.logger.log(`开始搜索应用 "${appName}" 的笔记数据`);
+
       // 确保页面在笔记管理页面
       const currentUrl = page.url();
       if (!currentUrl.includes('note-manager')) {
-        await page.goto('https://creator.xiaohongshu.com/new/note-manager', { waitUntil: 'networkidle2', timeout: 30000 });
+        await page.goto('https://creator.xiaohongshu.com/new/note-manager', {
+          waitUntil: 'networkidle2',
+          timeout: 30000,
+        });
         await page.waitForTimeout(2000);
       }
 
@@ -68,7 +73,7 @@ export class CrawlerService {
         };
       }
 
-      this.logger.log(`Successfully found note data for ${appName}: ${JSON.stringify(noteData)}`);
+      this.logger.log(`✅ 成功获取应用 "${appName}" 的笔记数据`);
 
       return {
         success: true,
@@ -81,46 +86,62 @@ export class CrawlerService {
           title: noteData.display_title,
         },
       };
-
     } catch (error) {
       this.logger.error(`Failed to search note for app ${appName}:`, error);
       return {
         success: false,
-        error: error.message,
+        error: error instanceof Error ? error.message : 'Unknown error',
       };
     }
   }
 
   // 保留原有方法以保持兼容性
-  async crawlNoteData(url: string): Promise<CrawlResult> {
-    return {
+  crawlNoteData(): Promise<CrawlResult> {
+    return Promise.resolve({
       success: false,
       error: '此方法已弃用，请使用 crawlNoteDataByAppName',
-    };
+    });
   }
 
   // 搜索应用名称并捕获API响应数据
-  private async searchAndCaptureNoteData(page: Page, appName: string): Promise<CreatorNoteData | null> {
+  private async searchAndCaptureNoteData(
+    page: Page,
+    appName: string,
+  ): Promise<CreatorNoteData | null> {
     try {
       // 设置请求拦截器
       let capturedData: CreatorNoteData | null = null;
-      
-      page.on('response', async (response) => {
+
+      const responseHandler = async (response: {
+        url: () => string;
+        json: () => Promise<unknown>;
+        status: () => number;
+        headers: () => Record<string, string>;
+      }): Promise<void> => {
         const url = response.url();
-        if (url.includes(this.API_URL_PATTERN) && url.includes(`keyword=${encodeURIComponent(appName)}`)) {
+        if (
+          url.includes(this.API_URL_PATTERN) &&
+          url.includes(`keyword=${encodeURIComponent(appName)}`)
+        ) {
           try {
-            const responseData = await response.json();
-            this.logger.log(`Captured API response for "${appName}": ${JSON.stringify(responseData)}`);
-            
-            if (responseData.success && responseData.data && responseData.data.notes && responseData.data.notes.length > 0) {
+            const responseData = (await response.json()) as {
+              success: boolean;
+              data?: {
+                notes?: CreatorNoteData[];
+              };
+            };
+
+            if (
+              responseData.success &&
+              responseData.data &&
+              responseData.data.notes &&
+              responseData.data.notes.length > 0
+            ) {
               const notes = responseData.data.notes;
-              
-              if (notes.length > 1) {
-                this.logger.log(`✅ Found ${notes.length} notes for app "${appName}", summing up all data`);
-              } else {
-                this.logger.log(`✅ Found 1 note for app "${appName}"`);
-              }
-              
+              this.logger.log(
+                `✅ API响应解析成功，找到 ${notes.length} 条笔记数据`,
+              );
+
               // 汇总所有笔记的数据
               capturedData = {
                 collected_count: 0,
@@ -128,45 +149,58 @@ export class CrawlerService {
                 likes: 0,
                 comments_count: 0,
                 shared_count: 0,
-                display_title: notes[0].display_title, // 取第一个笔记的标题
-                id: notes.map(note => note.id).join(','), // 合并所有笔记ID
+                display_title: notes[0].display_title,
+                id: notes.map((note: CreatorNoteData) => note.id).join(','),
               };
-              
+
               // 累加各项数据
               for (const note of notes) {
-                capturedData.collected_count += (note.collected_count || 0);
-                capturedData.view_count += (note.view_count || 0);
-                capturedData.likes += (note.likes || 0);
-                capturedData.comments_count += (note.comments_count || 0);
-                capturedData.shared_count += (note.shared_count || 0);
-                
-                this.logger.debug(`Note ${note.id}: likes=${note.likes}, collects=${note.collected_count}, views=${note.view_count}, comments=${note.comments_count}, shares=${note.shared_count}`);
+                capturedData.collected_count += note.collected_count || 0;
+                capturedData.view_count += note.view_count || 0;
+                capturedData.likes += note.likes || 0;
+                capturedData.comments_count += note.comments_count || 0;
+                capturedData.shared_count += note.shared_count || 0;
               }
-              
-              this.logger.log(`📊 Total aggregated data: likes=${capturedData.likes}, collects=${capturedData.collected_count}, views=${capturedData.view_count}, comments=${capturedData.comments_count}, shares=${capturedData.shared_count}`);
+
+              this.logger.log(
+                `📊 数据汇总完成: 赞=${capturedData.likes}, 收藏=${capturedData.collected_count}, 浏览=${capturedData.view_count}, 评论=${capturedData.comments_count}, 分享=${capturedData.shared_count}`,
+              );
+            } else {
+              this.logger.warn(
+                `API响应格式异常或无数据: success=${responseData.success}, hasData=${!!responseData.data}, hasNotes=${!!responseData.data?.notes}`,
+              );
             }
           } catch (error) {
-            this.logger.error(`Error parsing API response:`, error);
+            this.logger.error(
+              `API响应解析失败: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            );
+            this.logger.debug(
+              `响应状态: ${response.status()}, Content-Type: ${response.headers()['content-type']}`,
+            );
           }
         }
-      });
+      };
+
+      page.on('response', responseHandler as any);
 
       // 清空搜索框
       await this.clearSearchInput(page);
-      
+
       // 输入应用名称
       await this.inputSearchKeyword(page, appName);
-      
+
       // 等待API响应
       await page.waitForTimeout(3000);
-      
+
       // 移除事件监听器
-      page.removeAllListeners('response');
-      
+      page.off('response', responseHandler as any);
+
       return capturedData;
-      
     } catch (error) {
-      this.logger.error(`Error in searchAndCaptureNoteData:`, error);
+      this.logger.error(
+        `Error in searchAndCaptureNoteData:`,
+        error instanceof Error ? error.message : error,
+      );
       return null;
     }
   }
@@ -176,16 +210,14 @@ export class CrawlerService {
     try {
       const searchInput = await page.$x(this.SEARCH_INPUT_XPATH);
       if (searchInput.length > 0) {
-        await (searchInput[0] as any).click();
+        await (searchInput[0] as ElementHandle).click();
         await page.waitForTimeout(500);
-        
+
         // 全选并删除
         await page.keyboard.down('Control');
         await page.keyboard.press('KeyA');
         await page.keyboard.up('Control');
         await page.keyboard.press('Backspace');
-        
-        this.logger.debug('Search input cleared');
       }
     } catch (error) {
       this.logger.warn('Failed to clear search input:', error);
@@ -200,16 +232,18 @@ export class CrawlerService {
         throw new Error('Search input field not found');
       }
 
-      await (searchInput[0] as any).type(keyword, { delay: 100 });
+      await (searchInput[0] as ElementHandle).type(keyword, { delay: 100 });
       await page.keyboard.press('Enter');
-      
-      this.logger.log(`Search keyword "${keyword}" entered and submitted`);
+
+      this.logger.debug(`搜索关键词 "${keyword}" 已输入并提交`);
     } catch (error) {
-      this.logger.error(`Failed to input search keyword:`, error);
+      this.logger.error(
+        `Failed to input search keyword:`,
+        error instanceof Error ? error.message : error,
+      );
       throw error;
     }
   }
-
 
   // 验证应用名称是否有效（简单的非空检查）
   validateAppName(appName: string): boolean {

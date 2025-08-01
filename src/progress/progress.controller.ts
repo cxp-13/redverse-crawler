@@ -2,7 +2,12 @@ import { Controller, Get, Logger } from '@nestjs/common';
 import { RedisService } from '../redis/redis.service';
 
 interface LoginStatus {
-  loginStatus: 'idle' | 'logging_in' | 'waiting_sms_code' | 'logged_in' | 'failed';
+  loginStatus:
+    | 'idle'
+    | 'logging_in'
+    | 'waiting_sms_code'
+    | 'logged_in'
+    | 'failed';
   updateStatus: 'idle' | 'updating' | 'completed' | 'failed';
   progress: {
     total: number;
@@ -38,11 +43,15 @@ export class ProgressController {
   }
 
   @Get()
-  async getProgress(): Promise<{ success: boolean; data?: LoginStatus; error?: string }> {
+  async getProgress(): Promise<{
+    success: boolean;
+    data?: LoginStatus;
+    error?: string;
+  }> {
     try {
       this.logger.log('📊 Progress API called');
       const progress = await this.redisService.getProgress();
-      
+
       if (!progress) {
         this.logger.log('📊 No progress data found, returning default state');
         // 返回默认状态
@@ -61,7 +70,9 @@ export class ProgressController {
         };
       }
 
-      this.logger.log(`📊 Progress data retrieved successfully: status=${progress.loginStatus}/${progress.updateStatus}, progress=${JSON.stringify(progress.progress)}`);
+      this.logger.log(
+        `📊 Progress data retrieved successfully: status=${progress.loginStatus}/${progress.updateStatus}, progress=${JSON.stringify(progress.progress)}`,
+      );
       return {
         success: true,
         data: progress,

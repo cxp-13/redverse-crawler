@@ -1,11 +1,16 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Page } from 'puppeteer';
+import { Page, ElementHandle } from 'puppeteer';
 import { BrowserService } from '../browser/browser.service';
 import { RedisService } from '../redis/redis.service';
 
 export interface LoginStatus {
-  loginStatus: 'idle' | 'logging_in' | 'waiting_sms_code' | 'logged_in' | 'failed';
+  loginStatus:
+    | 'idle'
+    | 'logging_in'
+    | 'waiting_sms_code'
+    | 'logged_in'
+    | 'failed';
   updateStatus: 'idle' | 'updating' | 'completed' | 'failed';
   progress: {
     total: number;
@@ -25,14 +30,19 @@ export interface PhoneLoginConfig {
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
   private readonly XHS_LOGIN_URL = 'https://creator.xiaohongshu.com/';
-  private readonly XHS_NOTE_MANAGER_URL = 'https://creator.xiaohongshu.com/new/note-manager';
-  
+  private readonly XHS_NOTE_MANAGER_URL =
+    'https://creator.xiaohongshu.com/new/note-manager';
+
   // 创作者后台登录相关XPath
-  private readonly PHONE_INPUT_XPATH = '//*[@id="page"]/div/div[2]/div[1]/div[2]/div/div/div/div/div/div[2]/div[1]/div[1]/input';
-  private readonly GET_CODE_BUTTON_XPATH = '//*[@id="page"]/div/div[2]/div[1]/div[2]/div/div/div/div/div/div[2]/div[1]/div[2]/div/div/div[2]';
-  private readonly SMS_CODE_INPUT_XPATH = '//*[@id="page"]/div/div[2]/div[1]/div[2]/div/div/div/div/div/div[2]/div[1]/div[2]/input';
-  private readonly LOGIN_BUTTON_XPATH = '//*[@id="page"]/div/div[2]/div[1]/div[2]/div/div/div/div/div/button';
-  
+  private readonly PHONE_INPUT_XPATH =
+    '//*[@id="page"]/div/div[2]/div[1]/div[2]/div/div/div/div/div/div[2]/div[1]/div[1]/input';
+  private readonly GET_CODE_BUTTON_XPATH =
+    '//*[@id="page"]/div/div[2]/div[1]/div[2]/div/div/div/div/div/div[2]/div[1]/div[2]/div/div/div[2]';
+  private readonly SMS_CODE_INPUT_XPATH =
+    '//*[@id="page"]/div/div[2]/div[1]/div[2]/div/div/div/div/div/div[2]/div[1]/div[2]/input';
+  private readonly LOGIN_BUTTON_XPATH =
+    '//*[@id="page"]/div/div[2]/div[1]/div[2]/div/div/div/div/div/button';
+
   // 状态管理
   private systemStatus: LoginStatus = {
     loginStatus: 'idle',
@@ -84,7 +94,10 @@ export class AuthService {
       // 如果Redis中没有数据，返回内存中的默认状态
       return { ...this.systemStatus };
     } catch (error) {
-      this.logger.error('Failed to get status from Redis, using memory status:', error);
+      this.logger.error(
+        'Failed to get status from Redis, using memory status:',
+        error,
+      );
       return { ...this.systemStatus };
     }
   }
@@ -94,12 +107,15 @@ export class AuthService {
     // 更新内存状态
     this.systemStatus = { ...this.systemStatus, ...updates };
     if (updates.progress) {
-      this.systemStatus.progress = { ...this.systemStatus.progress, ...updates.progress };
+      this.systemStatus.progress = {
+        ...this.systemStatus.progress,
+        ...updates.progress,
+      };
     }
-    
+
     // 设置最后更新时间
     this.systemStatus.lastUpdate = new Date();
-    
+
     // 同步到Redis
     try {
       await this.redisService.setProgress(this.systemStatus);
@@ -111,15 +127,17 @@ export class AuthService {
   }
 
   // 启动手机号登录流程
-  async startPhoneLoginProcess(phoneNumber: string): Promise<{ success?: boolean; error?: string }> {
+  async startPhoneLoginProcess(
+    phoneNumber: string,
+  ): Promise<{ success?: boolean; error?: string }> {
     try {
       // 清理之前的会话
       await this.cleanupSession();
 
       // 更新状态
-      await this.updateSystemStatus({ 
+      await this.updateSystemStatus({
         loginStatus: 'logging_in',
-        error: undefined 
+        error: undefined,
       });
 
       // 创建新页面
@@ -130,7 +148,10 @@ export class AuthService {
 
       // 导航到创作者后台登录页面
       this.logger.log('Navigating to Xiaohongshu Creator Center login page...');
-      await page.goto(this.XHS_LOGIN_URL, { waitUntil: 'networkidle2', timeout: 30000 });
+      await page.goto(this.XHS_LOGIN_URL, {
+        waitUntil: 'networkidle2',
+        timeout: 30000,
+      });
       await page.waitForTimeout(3000);
 
       // 输入手机号
@@ -143,26 +164,34 @@ export class AuthService {
       await this.updateSystemStatus({ loginStatus: 'waiting_sms_code' });
       this.currentSession.isWaitingForSmsCode = true;
 
-      this.logger.log('SMS code requested successfully. Please call submitSmsCode() with the received code.');
+      this.logger.log(
+        'SMS code requested successfully. Please call submitSmsCode() with the received code.',
+      );
 
       return { success: true };
-
     } catch (error) {
       this.logger.error('Failed to start phone login process:', error);
-      await this.updateSystemStatus({ 
+      await this.updateSystemStatus({
         loginStatus: 'failed',
-        error: error.message 
+        error: error instanceof Error ? error.message : '未知错误',
       });
       await this.cleanupSession();
-      return { error: error.message };
+      return { error: error instanceof Error ? error.message : '未知错误' };
     }
   }
 
   // 提交短信验证码
-  async submitSmsCode(smsCode: string): Promise<{ success?: boolean; error?: string }> {
+  async submitSmsCode(
+    smsCode: string,
+  ): Promise<{ success?: boolean; error?: string }> {
     try {
-      if (!this.currentSession.page || !this.currentSession.isWaitingForSmsCode) {
-        throw new Error('No active phone login session or not waiting for SMS code');
+      if (
+        !this.currentSession.page ||
+        !this.currentSession.isWaitingForSmsCode
+      ) {
+        throw new Error(
+          'No active phone login session or not waiting for SMS code',
+        );
       }
 
       const page = this.currentSession.page;
@@ -177,41 +206,41 @@ export class AuthService {
       this.startLoginMonitoring();
 
       return { success: true };
-
     } catch (error) {
       this.logger.error('Failed to submit SMS code:', error);
-      await this.updateSystemStatus({ 
+      await this.updateSystemStatus({
         loginStatus: 'failed',
-        error: error.message 
+        error: error instanceof Error ? error.message : '未知错误',
       });
       await this.cleanupSession();
-      return { error: error.message };
+      return { error: error instanceof Error ? error.message : '未知错误' };
     }
   }
 
-
   // 输入手机号
-  private async inputPhoneNumber(page: Page, phoneNumber: string): Promise<void> {
+  private async inputPhoneNumber(
+    page: Page,
+    phoneNumber: string,
+  ): Promise<void> {
     const phoneInput = await page.$x(this.PHONE_INPUT_XPATH);
     if (phoneInput.length === 0) {
       throw new Error('Phone input field not found');
     }
 
-    await (phoneInput[0] as any).click();
+    await (phoneInput[0] as ElementHandle).click();
     await page.waitForTimeout(500);
-    
+
     // 清空输入框
     await phoneInput[0].focus();
     await page.keyboard.down('Control');
     await page.keyboard.press('KeyA');
     await page.keyboard.up('Control');
     await page.keyboard.press('Backspace');
-    
+
     // 输入手机号
     await phoneInput[0].type(phoneNumber, { delay: 100 });
     this.logger.log(`Phone number entered: ${phoneNumber}`);
   }
-
 
   // 请求短信验证码
   private async requestSmsCode(page: Page): Promise<void> {
@@ -220,7 +249,7 @@ export class AuthService {
       throw new Error('Get verification code button not found');
     }
 
-    await (getCodeButton[0] as any).click();
+    await (getCodeButton[0] as ElementHandle).click();
     await page.waitForTimeout(2000);
     this.logger.log('SMS verification code requested');
   }
@@ -232,16 +261,16 @@ export class AuthService {
       throw new Error('SMS code input field not found');
     }
 
-    await (smsInput[0] as any).click();
+    await (smsInput[0] as ElementHandle).click();
     await page.waitForTimeout(500);
-    
+
     // 清空输入框
     await smsInput[0].focus();
     await page.keyboard.down('Control');
     await page.keyboard.press('KeyA');
     await page.keyboard.up('Control');
     await page.keyboard.press('Backspace');
-    
+
     // 输入验证码
     await smsInput[0].type(smsCode, { delay: 100 });
     this.logger.log('SMS code entered');
@@ -254,59 +283,67 @@ export class AuthService {
       throw new Error('Login button not found');
     }
 
-    await (loginButton[0] as any).click();
+    await (loginButton[0] as ElementHandle).click();
     await page.waitForTimeout(2000);
     this.logger.log('Login form submitted');
   }
 
   // 启动5分钟登录监听
-  private async startLoginMonitoring(): Promise<void> {
+  private startLoginMonitoring(): void {
     const checkInterval = 1000; // 每秒检查一次
     const timeout = 300000; // 5分钟超时
     let elapsed = 0;
 
-    const timer = setInterval(async () => {
+    const timer = setInterval(() => {
       elapsed += checkInterval;
 
-      if (!this.currentSession.page || elapsed >= timeout) {
-        clearInterval(timer);
-        
-        if (elapsed >= timeout) {
-          this.logger.warn('Login timeout after 5 minutes');
-          await this.updateSystemStatus({ 
-            loginStatus: 'failed',
-            error: 'Login timeout' 
-          });
-          await this.cleanupAuthenticatedPage();
-        }
-        
-        await this.cleanupSession();
-        return;
-      }
-
-      try {
-        const isLoggedIn = await this.checkLoginStatus(this.currentSession.page);
-        
-        if (isLoggedIn) {
+      void (async () => {
+        if (!this.currentSession.page || elapsed >= timeout) {
           clearInterval(timer);
-          this.logger.log('✅ Login successful!');
-          await this.updateSystemStatus({ loginStatus: 'logged_in' });
-          
-          // 触发登录成功回调（开始数据更新）
-          if (this.onLoginSuccess) {
-            setTimeout(() => this.onLoginSuccess!(), 1000);
+
+          if (elapsed >= timeout) {
+            this.logger.warn('Login timeout after 5 minutes');
+            await this.updateSystemStatus({
+              loginStatus: 'failed',
+              error: 'Login timeout',
+            });
+            await this.cleanupAuthenticatedPage();
           }
-          
+
           await this.cleanupSession();
-        } else {
-          const remainingSeconds = Math.floor((timeout - elapsed) / 1000);
-          const minutes = Math.floor(remainingSeconds / 60);
-          const seconds = remainingSeconds % 60;
-          this.logger.log(`⏱️ Checking login status... ${minutes}m ${seconds}s remaining`);
+          return;
         }
-      } catch (error) {
-        this.logger.error('Error checking login status:', error);
-      }
+
+        try {
+          const isLoggedIn = await this.checkLoginStatus(
+            this.currentSession.page,
+          );
+
+          if (isLoggedIn) {
+            clearInterval(timer);
+            this.logger.log('✅ Login successful!');
+            await this.updateSystemStatus({ loginStatus: 'logged_in' });
+
+            // 触发登录成功回调（开始数据更新）
+            if (this.onLoginSuccess) {
+              setTimeout(() => {
+                this.onLoginSuccess!();
+              }, 1000);
+            }
+
+            await this.cleanupSession();
+          } else {
+            const remainingSeconds = Math.floor((timeout - elapsed) / 1000);
+            const minutes = Math.floor(remainingSeconds / 60);
+            const seconds = remainingSeconds % 60;
+            this.logger.log(
+              `⏱️ Checking login status... ${minutes}m ${seconds}s remaining`,
+            );
+          }
+        } catch (error) {
+          this.logger.error('Error checking login status:', error);
+        }
+      })();
     }, checkInterval);
   }
 
@@ -314,16 +351,23 @@ export class AuthService {
   private async checkLoginStatus(page: Page): Promise<boolean> {
     try {
       const currentUrl = page.url();
-      
+
       // 如果URL包含创作者后台的路径，说明已经登录成功
-      if (currentUrl.includes('creator.xiaohongshu.com') && 
-          (currentUrl.includes('/new/') || currentUrl.includes('/dashboard') || currentUrl.includes('/note-manager'))) {
+      if (
+        currentUrl.includes('creator.xiaohongshu.com') &&
+        (currentUrl.includes('/new/') ||
+          currentUrl.includes('/dashboard') ||
+          currentUrl.includes('/note-manager'))
+      ) {
         this.logger.log(`Login successful, redirected to: ${currentUrl}`);
         return true;
       }
-      
+
       // 检查是否还在登录页面
-      if (currentUrl.includes('creator.xiaohongshu.com') && !currentUrl.includes('/new/')) {
+      if (
+        currentUrl.includes('creator.xiaohongshu.com') &&
+        !currentUrl.includes('/new/')
+      ) {
         // 检查页面是否包含登录表单元素
         const phoneInput = await page.$x(this.PHONE_INPUT_XPATH);
         if (phoneInput.length > 0) {
@@ -331,7 +375,7 @@ export class AuthService {
           return false;
         }
       }
-      
+
       return true;
     } catch (error) {
       this.logger.warn('Error checking login status:', error);
@@ -348,7 +392,7 @@ export class AuthService {
         this.logger.warn('Error closing page:', error);
       }
     }
-    
+
     this.currentSession = {
       page: null,
       phoneNumber: null,
@@ -386,14 +430,19 @@ export class AuthService {
           this.logger.log('Reusing existing authenticated page');
           return this.authenticatedPage;
         } else {
-          this.logger.warn('Existing page is no longer authenticated, creating new one');
+          this.logger.warn(
+            'Existing page is no longer authenticated, creating new one',
+          );
           if (this.authenticatedPage) {
             await this.authenticatedPage.close();
           }
           this.authenticatedPage = null;
         }
       } catch (error) {
-        this.logger.warn('Error checking existing page, creating new one:', error);
+        this.logger.warn(
+          'Error checking existing page, creating new one:',
+          error,
+        );
         if (this.authenticatedPage) {
           await this.authenticatedPage.close();
         }
@@ -403,8 +452,11 @@ export class AuthService {
 
     // 创建新的认证页面，直接导航到笔记管理页面
     const page = await this.browserService.createPage();
-    await page.goto(this.XHS_NOTE_MANAGER_URL, { waitUntil: 'networkidle2', timeout: 30000 });
-    
+    await page.goto(this.XHS_NOTE_MANAGER_URL, {
+      waitUntil: 'networkidle2',
+      timeout: 30000,
+    });
+
     // 验证是否仍然处于登录状态
     const isLoggedIn = await this.checkLoginStatus(page);
     if (!isLoggedIn) {
@@ -428,12 +480,14 @@ export class AuthService {
         document.body.innerHTML = '';
         // 清除可能的缓存
         if ('caches' in window) {
-          caches.keys().then(names => {
-            names.forEach(name => caches.delete(name));
+          void caches.keys().then((names) => {
+            names.forEach((name) => {
+              void caches.delete(name);
+            });
           });
         }
       });
-      
+
       this.logger.debug('Page content cleaned for new URL');
     } catch (error) {
       this.logger.warn('Error cleaning page content:', error);

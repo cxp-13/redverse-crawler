@@ -3,8 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import puppeteer from 'puppeteer-extra';
 import { Browser, Page } from 'puppeteer';
 
-// 动态导入 stealth 插件
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+// 导入 stealth 插件
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 
 @Injectable()
 export class BrowserService {
@@ -19,7 +19,7 @@ export class BrowserService {
   async getBrowser(): Promise<Browser> {
     if (!this.browser) {
       this.logger.log('Launching new browser instance');
-      
+
       // 浏览器启动参数
       const args = [
         '--no-sandbox',
@@ -29,13 +29,19 @@ export class BrowserService {
       ];
 
       // 正确处理环境变量的布尔值转换
-      const headlessEnv = this.configService.get<string>('PUPPETEER_HEADLESS', 'false');
+      const headlessEnv = this.configService.get<string>(
+        'PUPPETEER_HEADLESS',
+        'false',
+      );
       const isHeadless = headlessEnv.toLowerCase() === 'true';
-      
-      this.logger.log(`Browser launching with headless: ${isHeadless}`);
-      
+
+      // 使用新的 headless 模式，避免 deprecation 警告
+      const headlessMode = isHeadless ? 'new' : false;
+
+      this.logger.log(`Browser launching with headless: ${headlessMode}`);
+
       this.browser = await puppeteer.launch({
-        headless: isHeadless,
+        headless: headlessMode,
         args: args,
         defaultViewport: {
           width: 1920,
@@ -66,7 +72,8 @@ export class BrowserService {
     await page.setExtraHTTPHeaders({
       'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
       'Accept-Encoding': 'gzip, deflate, br',
-      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+      Accept:
+        'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
     });
 
     // 移除 webdriver 属性

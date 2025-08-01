@@ -1,4 +1,10 @@
-import { Controller, Post, Body, HttpStatus, HttpException } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Body,
+  HttpStatus,
+  HttpException,
+} from '@nestjs/common';
 import { CrawlerService } from './crawler.service';
 
 @Controller('crawler')
@@ -10,18 +16,24 @@ export class CrawlerController {
     const { appName } = body;
 
     if (!appName) {
-      throw new HttpException({
-        success: false,
-        message: '应用名称参数不能为空',
-      }, HttpStatus.BAD_REQUEST);
+      throw new HttpException(
+        {
+          success: false,
+          message: '应用名称参数不能为空',
+        },
+        HttpStatus.BAD_REQUEST,
+      );
     }
 
     const isValidAppName = this.crawlerService.validateAppName(appName);
     if (!isValidAppName) {
-      throw new HttpException({
-        success: false,
-        message: '无效的应用名称',
-      }, HttpStatus.BAD_REQUEST);
+      throw new HttpException(
+        {
+          success: false,
+          message: '无效的应用名称',
+        },
+        HttpStatus.BAD_REQUEST,
+      );
     }
 
     try {
@@ -33,11 +45,14 @@ export class CrawlerController {
         error: result.error,
       };
     } catch (error) {
-      throw new HttpException({
-        success: false,
-        message: '爬取过程中发生错误',
-        error: error.message,
-      }, HttpStatus.INTERNAL_SERVER_ERROR);
+      throw new HttpException(
+        {
+          success: false,
+          message: '爬取过程中发生错误',
+          error: error instanceof Error ? error.message : 'Unknown error',
+        },
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
     }
   }
 }

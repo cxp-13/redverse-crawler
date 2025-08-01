@@ -39,33 +39,52 @@ export class EmailService {
       if (!this.resend) {
         return {
           success: false,
-          error: 'Email service not configured'
+          error: 'Email service not configured',
         };
       }
 
       const isUpdate = data.action === 'updated' && data.changes;
-      const actionText = data.action === 'created' ? 'Your App Featured on Xiaohongshu!' : 'Note Data Updated';
+      const actionText =
+        data.action === 'created'
+          ? 'Your App Featured on Xiaohongshu!'
+          : 'Note Data Updated';
       const actionEmoji = data.action === 'created' ? '🎉' : '📊';
 
       let changesHtml = '';
       let changesText = '';
-      
+
       if (isUpdate && data.changes) {
         const { likes, collects, comments, views, shares } = data.changes;
-        const hasIncrease = likes.diff > 0 || collects.diff > 0 || comments.diff > 0 || views.diff > 0 || shares.diff > 0;
-        
+        const hasIncrease =
+          likes.diff > 0 ||
+          collects.diff > 0 ||
+          comments.diff > 0 ||
+          views.diff > 0 ||
+          shares.diff > 0;
+
         // Calculate percentage increases
-        const likesPercent = likes.old > 0 ? Math.round((likes.diff / likes.old) * 100) : 0;
-        const viewsPercent = views.old > 0 ? Math.round((views.diff / views.old) * 100) : 0;
-        const collectsPercent = collects.old > 0 ? Math.round((collects.diff / collects.old) * 100) : 0;
-        const commentsPercent = comments.old > 0 ? Math.round((comments.diff / comments.old) * 100) : 0;
-        const sharesPercent = shares.old > 0 ? Math.round((shares.diff / shares.old) * 100) : 0;
-        
+        const likesPercent =
+          likes.old > 0 ? Math.round((likes.diff / likes.old) * 100) : 0;
+        const viewsPercent =
+          views.old > 0 ? Math.round((views.diff / views.old) * 100) : 0;
+        const collectsPercent =
+          collects.old > 0
+            ? Math.round((collects.diff / collects.old) * 100)
+            : 0;
+        const commentsPercent =
+          comments.old > 0
+            ? Math.round((comments.diff / comments.old) * 100)
+            : 0;
+        const sharesPercent =
+          shares.old > 0 ? Math.round((shares.diff / shares.old) * 100) : 0;
+
         changesHtml = `
           <div class="metrics-container">
             <h3 class="metrics-title">📊 Performance Update</h3>
             <div class="metrics-list">
-              ${likes.diff !== 0 ? `
+              ${
+                likes.diff !== 0
+                  ? `
               <div class="metric-item">
                 <div class="metric-left">
                   <div class="metric-icon">👍</div>
@@ -83,8 +102,12 @@ export class EmailService {
                   </div>
                 </div>
               </div>
-              ` : ''}
-              ${views.diff !== 0 ? `
+              `
+                  : ''
+              }
+              ${
+                views.diff !== 0
+                  ? `
               <div class="metric-item">
                 <div class="metric-left">
                   <div class="metric-icon">👀</div>
@@ -102,8 +125,12 @@ export class EmailService {
                   </div>
                 </div>
               </div>
-              ` : ''}
-              ${collects.diff !== 0 ? `
+              `
+                  : ''
+              }
+              ${
+                collects.diff !== 0
+                  ? `
               <div class="metric-item">
                 <div class="metric-left">
                   <div class="metric-icon">⭐</div>
@@ -121,8 +148,12 @@ export class EmailService {
                   </div>
                 </div>
               </div>
-              ` : ''}
-              ${comments.diff !== 0 ? `
+              `
+                  : ''
+              }
+              ${
+                comments.diff !== 0
+                  ? `
               <div class="metric-item">
                 <div class="metric-left">
                   <div class="metric-icon">💬</div>
@@ -140,8 +171,12 @@ export class EmailService {
                   </div>
                 </div>
               </div>
-              ` : ''}
-              ${shares.diff !== 0 ? `
+              `
+                  : ''
+              }
+              ${
+                shares.diff !== 0
+                  ? `
               <div class="metric-item">
                 <div class="metric-left">
                   <div class="metric-icon">🔄</div>
@@ -159,12 +194,14 @@ export class EmailService {
                   </div>
                 </div>
               </div>
-              ` : ''}
+              `
+                  : ''
+              }
             </div>
             ${hasIncrease ? '<div class="success-banner">🎉 Amazing growth! Your app is gaining momentum on Xiaohongshu!</div>' : ''}
           </div>
         `;
-        
+
         changesText = `
 Performance Update:
 ${likes.diff !== 0 ? `• Likes: ${likes.old.toLocaleString()} → ${likes.new.toLocaleString()} (${likes.diff > 0 ? '+' : ''}${likes.diff.toLocaleString()}${likes.old > 0 && likes.diff !== 0 ? `, ${likesPercent > 0 ? '+' : ''}${likesPercent}%` : ''})` : ''}
@@ -340,30 +377,39 @@ ${hasIncrease ? '🎉 Amazing growth! Your app is gaining momentum on Xiaohongsh
             
             <div class="content">
               <p>Hey there! 👋</p>
-              <p>${data.action === 'created' 
-                ? `Amazing news! <strong>${data.projectName}</strong> just got featured on Xiaohongshu! 🎉 This is huge - your app is now in front of millions of active users in China who love discovering cool new products.`
-                : `We've got some fresh numbers for <strong>${data.projectName}</strong> on Xiaohongshu! Here's how your post is performing:`
+              <p>${
+                data.action === 'created'
+                  ? `Amazing news! <strong>${data.projectName}</strong> just got featured on Xiaohongshu! 🎉 This is huge - your app is now in front of millions of active users in China who love discovering cool new products.`
+                  : `We've got some fresh numbers for <strong>${data.projectName}</strong> on Xiaohongshu! Here's how your post is performing:`
               }</p>
               
               ${changesHtml}
               
-              ${data.noteUrl ? `
+              ${
+                data.noteUrl
+                  ? `
               <div style="margin: 30px 0;">
                 <a href="${data.noteUrl}" class="cta-button" target="_blank">
                   View on Xiaohongshu
                 </a>
               </div>
-              ` : ''}
+              `
+                  : ''
+              }
               
-              ${data.action === 'created' ? `
+              ${
+                data.action === 'created'
+                  ? `
               <p style="margin-top: 24px; padding: 16px; background-color: #f8f9fa; border-left: 3px solid #000; border-radius: 6px; color: #37352f;">
                 <strong>💡 Quick tip:</strong> This is perfect content to share with your community and investors. Xiaohongshu exposure can be a real game-changer for market entry in China!
               </p>
-              ` : `
+              `
+                  : `
               <p style="margin-top: 24px; color: #6b7280;">
                 Keep up the great work! 🚀 These numbers show real people are discovering and engaging with your product.
               </p>
-              `}
+              `
+              }
             </div>
             
             <div class="footer">
@@ -381,24 +427,29 @@ ${actionText} - ${data.projectName}
 
 Hey there! 👋
 
-${data.action === 'created' 
-  ? `Amazing news! ${data.projectName} just got featured on Xiaohongshu! 🎉 This is huge - your app is now in front of millions of active users in China who love discovering cool new products.`
-  : `We've got some fresh numbers for ${data.projectName} on Xiaohongshu! Here's how your post is performing:`
+${
+  data.action === 'created'
+    ? `Amazing news! ${data.projectName} just got featured on Xiaohongshu! 🎉 This is huge - your app is now in front of millions of active users in China who love discovering cool new products.`
+    : `We've got some fresh numbers for ${data.projectName} on Xiaohongshu! Here's how your post is performing:`
 }
 
 ${changesText}
 
 ${data.noteUrl ? `View on Xiaohongshu: ${data.noteUrl}` : ''}
 
-${data.action === 'created' ? `
-💡 Quick tip: This is perfect content to share with your community and investors. Xiaohongshu exposure can be a real game-changer for market entry in China!` : `
-Keep up the great work! 🚀 These numbers show real people are discovering and engaging with your product.`}
+${
+  data.action === 'created'
+    ? `
+💡 Quick tip: This is perfect content to share with your community and investors. Xiaohongshu exposure can be a real game-changer for market entry in China!`
+    : `
+Keep up the great work! 🚀 These numbers show real people are discovering and engaging with your product.`
+}
 
 Best regards,
 Redverse Team
       `;
 
-      const result = await this.resend.emails.send({
+      await this.resend.emails.send({
         from: 'Redverse <hello@redverse.online>',
         to: data.userEmail,
         subject: `${actionEmoji} ${actionText} - ${data.projectName}`,
@@ -406,17 +457,18 @@ Redverse Team
         text: emailText,
       });
 
-      this.logger.log(`📧 Note notification email sent successfully to ${data.userEmail} for ${data.projectName}`);
-      
-      return {
-        success: true
-      };
+      this.logger.log(
+        `📧 Note notification email sent successfully to ${data.userEmail} for ${data.projectName}`,
+      );
 
+      return {
+        success: true,
+      };
     } catch (error) {
       this.logger.error('Failed to send note notification email:', error);
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error'
+        error: error instanceof Error ? error.message : 'Unknown error',
       };
     }
   }
