@@ -4,7 +4,7 @@ import puppeteer from 'puppeteer-extra';
 import { Browser, Page } from 'puppeteer';
 
 // 导入 stealth 插件
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 
 @Injectable()
 export class BrowserService {

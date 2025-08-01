@@ -8,15 +8,12 @@ async function bootstrap() {
 
   // 不使用全局API前缀
 
-  // 启用CORS
+  // 启用CORS - 允许所有跨域请求
   app.enableCors({
-    origin: [
-      'http://localhost:3000',
-      'https://redverse.com',
-      'https://www.redverse.online',
-      // 添加你的redverse域名
-    ],
+    origin: true, // 允许所有来源
     credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
   });
 
   const preferredPort = parseInt(process.env.API_PORT || '3000', 10);
