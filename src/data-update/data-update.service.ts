@@ -27,6 +27,7 @@ interface Application {
 export class DataUpdateService {
   private readonly logger = new Logger(DataUpdateService.name);
   private isUpdating = false;
+  private readonly maxConcurrentRequests = 3;
 
   constructor(
     private authService: AuthService,
@@ -113,28 +114,35 @@ export class DataUpdateService {
           );
 
           if (result.success && result.data) {
-            // 更新所有关联的笔记
-            for (const note of notes) {
-              try {
-                await this.updateNoteWithEmailNotification(note, result.data);
-                processed++;
-                this.logger.log(
-                  `✅ Successfully updated note: ${note.id} for app "${application.name}"`,
-                );
-              } catch (error) {
-                failed++;
-                this.logger.error(`❌ Error updating note ${note.id}:`, error);
-              }
+            // 分批处理笔记更新，控制并发数量
+            const crawledData = result.data; // Save reference to avoid undefined type issue
+            await this.processBatchWithConcurrency(
+              notes,
+              async (note) => {
+                await this.updateNoteWithEmailNotification(note, crawledData);
+              },
+              this.maxConcurrentRequests,
+              async (note, success) => {
+                if (success) {
+                  processed++;
+                  this.logger.log(
+                    `✅ Successfully updated note: ${note.id} for app "${application.name}"`,
+                  );
+                } else {
+                  failed++;
+                  this.logger.error(`❌ Error updating note ${note.id}`);
+                }
 
-              // 更新进度
-              await this.authService.updateSystemStatus({
-                progress: {
-                  total: totalNotes,
-                  processed: processed,
-                  failed: failed,
-                },
-              });
-            }
+                // 更新进度
+                await this.authService.updateSystemStatus({
+                  progress: {
+                    total: totalNotes,
+                    processed: processed,
+                    failed: failed,
+                  },
+                });
+              },
+            );
           } else {
             // 如果搜索失败，所有相关笔记都标记为失败
             failed += notes.length;
@@ -272,27 +280,70 @@ export class DataUpdateService {
       shares_count: number;
     },
   ): Promise<void> {
-    try {
-      const supabase = this.supabaseService.getClient();
-      const updateData = {
-        likes_count: data.likes_count,
-        collects_count: data.collects_count,
-        comments_count: data.comments_count,
-        views_count: data.views_count,
-        shares_count: data.shares_count,
-      };
+    const maxRetries = 3;
+    const baseDelay = 1000; // 1 second
 
-      const { error } = await supabase
-        .from('note')
-        .update(updateData)
-        .eq('id', noteId);
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const supabase = this.supabaseService.getClient();
+        const updateData = {
+          likes_count: data.likes_count,
+          collects_count: data.collects_count,
+          comments_count: data.comments_count,
+          views_count: data.views_count,
+          shares_count: data.shares_count,
+        };
 
-      if (error) {
-        throw error;
+        const { error } = await supabase
+          .from('note')
+          .update(updateData)
+          .eq('id', noteId);
+
+        if (error) {
+          throw error;
+        }
+
+        // Success - log and return
+        if (attempt > 1) {
+          this.logger.log(
+            `✅ Successfully updated note ${noteId} on attempt ${attempt}`,
+          );
+        }
+        return;
+      } catch (error) {
+        const isLastAttempt = attempt === maxRetries;
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+
+        // Check if it's a network-related error that might benefit from retry
+        const isRetryableError =
+          errorMessage.includes('fetch failed') ||
+          errorMessage.includes('ECONNRESET') ||
+          errorMessage.includes('ETIMEDOUT') ||
+          errorMessage.includes('AbortError');
+
+        if (!isRetryableError || isLastAttempt) {
+          this.logger.error(
+            `Failed to update note ${noteId} in Supabase (attempt ${attempt}/${maxRetries}):`,
+            {
+              message: errorMessage,
+              details: error instanceof Error ? error.stack : String(error),
+              noteId,
+              attempt,
+              isRetryableError,
+            },
+          );
+          throw error;
+        }
+
+        // Calculate delay with exponential backoff
+        const delay = baseDelay * Math.pow(2, attempt - 1);
+        this.logger.warn(
+          `Failed to update note ${noteId} (attempt ${attempt}/${maxRetries}): ${errorMessage}. Retrying in ${delay}ms...`,
+        );
+
+        await this.delay(delay);
       }
-    } catch (error) {
-      this.logger.error(`Failed to update note ${noteId} in Supabase:`, error);
-      throw error;
     }
   }
 
@@ -420,11 +471,33 @@ export class DataUpdateService {
           `📧 Email notification sent to ${userEmail} for ${application.name}`,
         );
       } catch (emailError) {
-        this.logger.error(`Failed to send email notification:`, emailError);
+        const errorMessage =
+          emailError instanceof Error ? emailError.message : String(emailError);
+        this.logger.error(
+          `Failed to send email notification for note ${note.id}:`,
+          {
+            message: errorMessage,
+            noteId: note.id,
+            noteUrl: note.url,
+            userEmail,
+            appName: application?.name,
+          },
+        );
         // 邮件发送失败不应该中断更新流程
       }
     } catch (error) {
-      this.logger.error(`Error in updateNoteWithEmailNotification:`, error);
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `Error in updateNoteWithEmailNotification for note ${note.id}:`,
+        {
+          message: errorMessage,
+          details: error instanceof Error ? error.stack : String(error),
+          noteId: note.id,
+          noteUrl: note.url,
+          appId: note.app_id,
+        },
+      );
       throw error;
     }
   }
@@ -432,5 +505,38 @@ export class DataUpdateService {
   // 延迟函数
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  // 并发控制批量处理
+  private async processBatchWithConcurrency<T>(
+    items: T[],
+    processor: (item: T) => Promise<void>,
+    maxConcurrency: number,
+    onComplete?: (item: T, success: boolean) => Promise<void>,
+  ): Promise<void> {
+    // Simple chunked approach for better stability
+    for (let i = 0; i < items.length; i += maxConcurrency) {
+      const chunk = items.slice(i, i + maxConcurrency);
+      const promises = chunk.map(async (item) => {
+        try {
+          await processor(item);
+          if (onComplete) {
+            await onComplete(item, true);
+          }
+        } catch (error) {
+          this.logger.error(`Error processing item:`, error);
+          if (onComplete) {
+            await onComplete(item, false);
+          }
+        }
+      });
+
+      await Promise.all(promises);
+
+      // Small delay between batches to avoid overwhelming the server
+      if (i + maxConcurrency < items.length) {
+        await this.delay(500); // 500ms delay between batches
+      }
+    }
   }
 }

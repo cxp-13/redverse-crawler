@@ -21,7 +21,28 @@ export class SupabaseService {
     this.logger.log(`[DATABASE] Connecting to Supabase at: ${supabaseUrl}`);
 
     try {
-      this.supabase = createClient(supabaseUrl, supabaseKey);
+      this.supabase = createClient(supabaseUrl, supabaseKey, {
+        db: {
+          schema: 'public',
+        },
+        auth: {
+          persistSession: false,
+        },
+        global: {
+          fetch: (url: string | URL | Request, options = {}) => {
+            const timeout = 30000; // 30 seconds timeout
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+            return fetch(url, {
+              ...options,
+              signal: controller.signal,
+            }).finally(() => {
+              clearTimeout(timeoutId);
+            });
+          },
+        },
+      });
       this.logger.log('[DATABASE] ✅ Supabase client initialized successfully');
     } catch (error) {
       this.logger.error(

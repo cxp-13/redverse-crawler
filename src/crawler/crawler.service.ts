@@ -58,7 +58,7 @@ export class CrawlerService {
       if (!currentUrl.includes('note-manager')) {
         await page.goto('https://creator.xiaohongshu.com/new/note-manager', {
           waitUntil: 'networkidle2',
-          timeout: 30000,
+          timeout: 60000,
         });
         await page.waitForTimeout(2000);
       }

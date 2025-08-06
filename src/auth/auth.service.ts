@@ -150,9 +150,25 @@ export class AuthService {
       this.logger.log('Navigating to Xiaohongshu Creator Center login page...');
       await page.goto(this.XHS_LOGIN_URL, {
         waitUntil: 'networkidle2',
-        timeout: 30000,
+        timeout: 60000,
       });
-      await page.waitForTimeout(3000);
+      // 智能等待页面完全加载 - 等待手机号输入框出现（最多30秒）
+      this.logger.log(
+        'Waiting for login elements to appear (max 30 seconds)...',
+      );
+      try {
+        await page.waitForXPath(this.PHONE_INPUT_XPATH, { timeout: 30000 });
+        this.logger.log(
+          'Login elements found! Page is ready for automatic login.',
+        );
+      } catch {
+        this.logger.warn(
+          'Login elements not found within 30 seconds, proceeding anyway...',
+        );
+        // 继续执行，可能页面结构有变化但仍可尝试登录
+      }
+
+      this.logger.log('Starting automatic login process...');
 
       // 输入手机号
       await this.inputPhoneNumber(page, phoneNumber);
@@ -454,7 +470,7 @@ export class AuthService {
     const page = await this.browserService.createPage();
     await page.goto(this.XHS_NOTE_MANAGER_URL, {
       waitUntil: 'networkidle2',
-      timeout: 30000,
+      timeout: 60000,
     });
 
     // 验证是否仍然处于登录状态
