@@ -4,7 +4,7 @@ import { ConfigService } from '@nestjs/config';
 interface NoteNotificationData {
   userEmail: string;
   projectName: string;
-  action: 'created' | 'updated';
+  action: 'created' | 'updated' | 'report';
   noteUrl?: string;
   founderName?: string;
   changes?: {
@@ -14,6 +14,14 @@ interface NoteNotificationData {
     views: { old: number; new: number; diff: number };
     shares: { old: number; new: number; diff: number };
   };
+  completeData?: {
+    likes_count: number;
+    collects_count: number;
+    comments_count: number;
+    views_count: number;
+    shares_count: number;
+  };
+  dataDate?: string;
 }
 
 @Injectable()
@@ -67,9 +75,18 @@ export class EmailService {
         };
 
         if (result.success) {
+          const actionMessage =
+            data.action === 'report'
+              ? 'data report'
+              : `${data.action} notification`;
           this.logger.log(
-            `📧 Note notification email sent successfully to ${data.userEmail} for ${data.projectName} via API`,
+            `📧 Note ${actionMessage} email sent successfully to ${data.userEmail} for ${data.projectName} via API`,
           );
+          if (data.completeData) {
+            this.logger.debug(
+              `📊 Complete data sent: likes=${data.completeData.likes_count}, collects=${data.completeData.collects_count}, views=${data.completeData.views_count}, comments=${data.completeData.comments_count}, shares=${data.completeData.shares_count}`,
+            );
+          }
           return { success: true };
         } else {
           throw new Error(result.error ?? 'API returned failure response');

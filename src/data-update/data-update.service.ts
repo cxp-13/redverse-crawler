@@ -394,7 +394,7 @@ export class DataUpdateService {
         return;
       }
 
-      // 3. 检查是否有数据变化
+      // 3. 计算数据变化（用于记录，但不影响邮件发送）
       const hasChanges =
         newData.likes_count !== (note.likes_count || 0) ||
         newData.collects_count !== (note.collects_count || 0) ||
@@ -402,12 +402,9 @@ export class DataUpdateService {
         newData.views_count !== (note.views_count || 0) ||
         newData.shares_count !== (note.shares_count || 0);
 
-      if (!hasChanges) {
-        this.logger.debug(
-          `No changes detected for note ${note.id}, skipping email notification`,
-        );
-        return;
-      }
+      this.logger.debug(
+        `Processing note ${note.id}, hasChanges: ${hasChanges}. Always sending complete data email.`,
+      );
 
       // 4. 获取应用信息
       const application = await this.getApplicationByAppId(note.app_id);
@@ -458,14 +455,22 @@ export class DataUpdateService {
         },
       };
 
-      // 7. 发送邮件通知
+      // 7. 发送完整数据邮件通知（无论是否有变化）
       try {
         await this.emailService.sendNoteNotification({
           userEmail,
           projectName: application.name,
-          action: 'updated',
+          action: hasChanges ? 'updated' : 'report',
           noteUrl: note.url,
           changes,
+          completeData: {
+            likes_count: newData.likes_count,
+            collects_count: newData.collects_count,
+            comments_count: newData.comments_count,
+            views_count: newData.views_count,
+            shares_count: newData.shares_count,
+          },
+          dataDate: new Date().toISOString(),
         });
         this.logger.log(
           `📧 Email notification sent to ${userEmail} for ${application.name}`,
