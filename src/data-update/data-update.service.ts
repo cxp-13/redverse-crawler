@@ -220,7 +220,7 @@ export class DataUpdateService {
 
       // 获取所有应用
       const { data: applications, error: appError } = await supabase
-        .from('application')
+        .from('applications')
         .select('id, name, user_id');
 
       if (appError) {
@@ -240,7 +240,7 @@ export class DataUpdateService {
       const result: Array<{ application: Application; notes: Note[] }> = [];
       for (const app of applications) {
         const { data: notes, error: noteError } = await supabase
-          .from('note')
+          .from('notes')
           .select(
             'id, url, app_id, likes_count, collects_count, comments_count, views_count, shares_count',
           )
@@ -295,7 +295,7 @@ export class DataUpdateService {
         };
 
         const { error } = await supabase
-          .from('note')
+          .from('notes')
           .update(updateData)
           .eq('id', noteId);
 
@@ -354,7 +354,7 @@ export class DataUpdateService {
     try {
       const supabase = this.supabaseService.getClient();
       const { data, error } = await supabase
-        .from('application')
+        .from('applications')
         .select('id, name, user_id')
         .eq('id', appId)
         .single();
