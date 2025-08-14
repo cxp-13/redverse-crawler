@@ -5,6 +5,7 @@ import { SupabaseService } from '../lib/supabase';
 import { RedisService } from '../redis/redis.service';
 import { EmailService } from '../email/email.service';
 import { ClerkService } from '../clerk/clerk.service';
+import { RetryUtil } from '../common/utils/retry.util';
 
 interface Note {
   id: string;
@@ -28,6 +29,12 @@ export class DataUpdateService {
   private readonly logger = new Logger(DataUpdateService.name);
   private isUpdating = false;
   private readonly maxConcurrentRequests = 3;
+  private readonly retryOptions = {
+    maxRetries: 3,
+    baseDelay: 1000,
+    maxDelay: 10000,
+    exponentialBackoff: true,
+  };
 
   constructor(
     private authService: AuthService,
@@ -216,55 +223,62 @@ export class DataUpdateService {
     notes: Note[];
   }> | null> {
     try {
-      const supabase = this.supabaseService.getClient();
+      return await RetryUtil.withRetry(async () => {
+        const supabase = this.supabaseService.getClient();
 
-      // 获取所有应用
-      const { data: applications, error: appError } = await supabase
-        .from('applications')
-        .select('id, name, user_id');
+        // 获取所有应用
+        const { data: applications, error: appError } = await supabase
+          .from('applications')
+          .select('id, name, user_id');
 
-      if (appError) {
-        this.logger.error(
-          'Failed to fetch applications from Supabase:',
-          appError,
-        );
-        return null;
-      }
-
-      if (!applications || applications.length === 0) {
-        this.logger.warn('No applications found');
-        return [];
-      }
-
-      // 为每个应用获取对应的笔记
-      const result: Array<{ application: Application; notes: Note[] }> = [];
-      for (const app of applications) {
-        const { data: notes, error: noteError } = await supabase
-          .from('notes')
-          .select(
-            'id, url, app_id, likes_count, collects_count, comments_count, views_count, shares_count',
-          )
-          .eq('app_id', app.id);
-
-        if (noteError) {
+        if (appError) {
           this.logger.error(
-            `Failed to fetch notes for app ${app.id}:`,
-            noteError,
+            'Failed to fetch applications from Supabase:',
+            appError,
           );
-          continue;
+          throw new Error(
+            `Supabase error: ${appError.message || JSON.stringify(appError)}`,
+          );
         }
 
-        if (notes && notes.length > 0) {
-          result.push({
-            application: app as Application,
-            notes: notes as Note[],
-          });
+        if (!applications || applications.length === 0) {
+          this.logger.warn('No applications found');
+          return [];
         }
-      }
 
-      return result;
+        // 为每个应用获取对应的笔记
+        const result: Array<{ application: Application; notes: Note[] }> = [];
+        for (const app of applications) {
+          const { data: notes, error: noteError } = await supabase
+            .from('notes')
+            .select(
+              'id, url, app_id, likes_count, collects_count, comments_count, views_count, shares_count',
+            )
+            .eq('app_id', app.id);
+
+          if (noteError) {
+            this.logger.error(
+              `Failed to fetch notes for app ${app.id}:`,
+              noteError,
+            );
+            continue;
+          }
+
+          if (notes && notes.length > 0) {
+            result.push({
+              application: app as Application,
+              notes: notes as Note[],
+            });
+          }
+        }
+
+        return result;
+      }, this.retryOptions);
     } catch (error) {
-      this.logger.error('Error fetching applications with notes:', error);
+      this.logger.error(
+        'Error fetching applications with notes after retries:',
+        error,
+      );
       return null;
     }
   }
