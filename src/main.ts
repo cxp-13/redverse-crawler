@@ -16,7 +16,7 @@ async function bootstrap() {
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
   });
 
-  const preferredPort = parseInt(process.env.API_PORT || '3000', 10);
+  const preferredPort = 3000;
   let actualPort: number;
 
   try {
