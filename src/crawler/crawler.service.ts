@@ -46,13 +46,11 @@ export class CrawlerService {
     if (!page) {
       return {
         success: false,
-        error: '未登录，无法获取数据',
+        error: 'Not logged in, unable to get data',
       };
     }
 
     try {
-      this.logger.log(`开始搜索应用 "${appName}" 的笔记数据`);
-
       // 确保页面在笔记管理页面
       const currentUrl = page.url();
       if (!currentUrl.includes('note-manager')) {
@@ -69,10 +67,6 @@ export class CrawlerService {
       if (!result.success) {
         return result;
       }
-
-      this.logger.log(
-        `✅ 成功获取应用 "${appName}" 的笔记数据 (使用搜索词: "${result.usedSearchTerm}")`,
-      );
 
       return {
         success: true,
@@ -91,7 +85,7 @@ export class CrawlerService {
   crawlNoteData(): Promise<CrawlResult> {
     return Promise.resolve({
       success: false,
-      error: '此方法已弃用，请使用 crawlNoteDataByAppName',
+      error: 'This method is deprecated, please use crawlNoteDataByAppName',
     });
   }
 
@@ -118,7 +112,7 @@ export class CrawlerService {
     const minSearchLength = this.containsChinese(appName) ? 1 : 2;
 
     this.logger.log(
-      `🎯 开始递归搜索应用 "${originalAppName}"，最小搜索长度: ${minSearchLength}`,
+      `Starting recursive search for app "${originalAppName}", min search length: ${minSearchLength}`,
     );
 
     const searchAttempts: string[] = [];
@@ -128,20 +122,13 @@ export class CrawlerService {
       searchAttempts.push(searchTerm);
 
       this.logger.log(
-        `🔍 尝试搜索词: "${searchTerm}" (长度: ${length}/${appName.length})`,
+        `Trying search term: "${searchTerm}" (length: ${length}/${appName.length})`,
       );
 
       try {
         const noteData = await this.searchAndCaptureNoteData(page, searchTerm);
 
         if (noteData) {
-          this.logger.log(
-            `✅ 搜索成功！使用搜索词: "${searchTerm}"，找到笔记数据`,
-          );
-          this.logger.log(
-            `📊 数据预览: 赞=${noteData.likes}, 收藏=${noteData.collected_count}, 浏览=${noteData.view_count}`,
-          );
-
           return {
             success: true,
             data: {
@@ -156,11 +143,14 @@ export class CrawlerService {
           };
         } else {
           this.logger.warn(
-            `⚠️ 搜索词 "${searchTerm}" 无结果，继续尝试更短的搜索词...`,
+            `Search term "${searchTerm}" returned no results, trying shorter terms...`,
           );
         }
       } catch (error) {
-        this.logger.error(`搜索词 "${searchTerm}" 时发生错误:`, error);
+        this.logger.error(
+          `Error occurred when searching term "${searchTerm}":`,
+          error,
+        );
         // 继续尝试下一个更短的搜索词
         continue;
       }
@@ -170,12 +160,12 @@ export class CrawlerService {
     }
 
     this.logger.error(
-      `❌ 递归搜索失败，已尝试的搜索词: [${searchAttempts.join(', ')}]`,
+      `Recursive search failed, attempted search terms: [${searchAttempts.join(', ')}]`,
     );
 
     return {
       success: false,
-      error: `应用 "${originalAppName}" 的所有搜索尝试都失败了（尝试了 ${searchAttempts.length} 个搜索词: ${searchAttempts.join(', ')}）`,
+      error: `All search attempts for app "${originalAppName}" failed (tried ${searchAttempts.length} search terms: ${searchAttempts.join(', ')})`,
     };
   }
 
@@ -205,7 +195,17 @@ export class CrawlerService {
           url.includes(`keyword=${encodeURIComponent(appName)}`)
         ) {
           try {
-            const responseData = (await response.json()) as {
+            const jsonResponse = await response.json();
+
+            // Add null/undefined checks
+            if (!jsonResponse || typeof jsonResponse !== 'object') {
+              this.logger.warn(
+                `API response is not a valid object: ${typeof jsonResponse}`,
+              );
+              return;
+            }
+
+            const responseData = jsonResponse as {
               success: boolean;
               data?: {
                 notes?: CreatorNoteData[];
@@ -213,15 +213,13 @@ export class CrawlerService {
             };
 
             if (
+              responseData &&
               responseData.success &&
               responseData.data &&
               responseData.data.notes &&
               responseData.data.notes.length > 0
             ) {
               const notes = responseData.data.notes;
-              this.logger.log(
-                `✅ API响应解析成功，找到 ${notes.length} 条笔记数据`,
-              );
 
               // 汇总所有笔记的数据
               capturedData = {
@@ -242,21 +240,17 @@ export class CrawlerService {
                 capturedData.comments_count += note.comments_count || 0;
                 capturedData.shared_count += note.shared_count || 0;
               }
-
-              this.logger.log(
-                `📊 数据汇总完成: 赞=${capturedData.likes}, 收藏=${capturedData.collected_count}, 浏览=${capturedData.view_count}, 评论=${capturedData.comments_count}, 分享=${capturedData.shared_count}`,
-              );
             } else {
               this.logger.warn(
-                `API响应格式异常或无数据: success=${responseData.success}, hasData=${!!responseData.data}, hasNotes=${!!responseData.data?.notes}`,
+                `API response format abnormal or no data: success=${responseData.success}, hasData=${!!responseData.data}, hasNotes=${!!responseData.data?.notes}`,
               );
             }
           } catch (error) {
             this.logger.error(
-              `API响应解析失败: ${error instanceof Error ? error.message : 'Unknown error'}`,
+              `API response parsing failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
             );
             this.logger.debug(
-              `响应状态: ${response.status()}, Content-Type: ${response.headers()['content-type']}`,
+              `Response status: ${response.status()}, Content-Type: ${response.headers()['content-type']}`,
             );
           }
         }
@@ -278,11 +272,7 @@ export class CrawlerService {
       // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
       page.off('response', responseHandler as any);
 
-      if (capturedData) {
-        this.logger.debug(`🎯 搜索词 "${appName}" 成功捕获数据`);
-      } else {
-        this.logger.debug(`❌ 搜索词 "${appName}" 未捕获到任何数据`);
-      }
+      // Return captured data or null if none found
 
       return capturedData;
     } catch (error) {
@@ -323,8 +313,6 @@ export class CrawlerService {
 
       await (searchInput[0] as ElementHandle).type(keyword, { delay: 100 });
       await page.keyboard.press('Enter');
-
-      this.logger.debug(`搜索关键词 "${keyword}" 已输入并提交`);
     } catch (error) {
       this.logger.error(
         `Failed to input search keyword:`,

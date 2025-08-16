@@ -2,11 +2,10 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 interface NoteNotificationData {
-  userEmail: string;
+  userId: string;
   projectName: string;
   action: 'created' | 'updated' | 'report';
   noteUrl?: string;
-  founderName?: string;
   changes?: {
     likes: { old: number; new: number; diff: number };
     collects: { old: number; new: number; diff: number };
@@ -44,7 +43,7 @@ export class EmailService {
     success: boolean;
     error?: string;
   }> {
-    const maxRetries = 3;
+    const maxRetries = 10;
     const baseDelay = 1000;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -75,18 +74,6 @@ export class EmailService {
         };
 
         if (result.success) {
-          const actionMessage =
-            data.action === 'report'
-              ? 'data report'
-              : `${data.action} notification`;
-          this.logger.log(
-            `📧 Note ${actionMessage} email sent successfully to ${data.userEmail} for ${data.projectName} via API`,
-          );
-          if (data.completeData) {
-            this.logger.debug(
-              `📊 Complete data sent: likes=${data.completeData.likes_count}, collects=${data.completeData.collects_count}, views=${data.completeData.views_count}, comments=${data.completeData.comments_count}, shares=${data.completeData.shares_count}`,
-            );
-          }
           return { success: true };
         } else {
           throw new Error(result.error ?? 'API returned failure response');
@@ -108,10 +95,10 @@ export class EmailService {
 
         if (!isRetryableError || isLastAttempt) {
           this.logger.error(
-            `Failed to send note notification email via API (attempt ${attempt}/${maxRetries}):`,
+            `[Email Client] Email sending failed - project: "${data.projectName}", user: ${data.userId} (attempt ${attempt}/${maxRetries})`,
             {
               message: errorMessage,
-              userEmail: data.userEmail,
+              userId: data.userId,
               projectName: data.projectName,
               attempt,
               isRetryableError,
@@ -127,12 +114,16 @@ export class EmailService {
         // Calculate delay with exponential backoff
         const delay = baseDelay * Math.pow(2, attempt - 1);
         this.logger.warn(
-          `Failed to send note notification via API (attempt ${attempt}/${maxRetries}): ${errorMessage}. Retrying in ${delay}ms...`,
+          `[Email Client] Retrying email sending - project: "${data.projectName}", user: ${data.userId} (attempt ${attempt}/${maxRetries}), error: ${errorMessage}, retrying in ${delay}ms...`,
         );
 
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
     }
+
+    this.logger.error(
+      `[Email Client] All retry attempts failed - project: "${data.projectName}", user: ${data.userId}, maxRetries: ${maxRetries}`,
+    );
 
     return {
       success: false,

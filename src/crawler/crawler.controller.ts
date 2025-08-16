@@ -19,7 +19,7 @@ export class CrawlerController {
       throw new HttpException(
         {
           success: false,
-          message: '应用名称参数不能为空',
+          message: 'App name parameter cannot be empty',
         },
         HttpStatus.BAD_REQUEST,
       );
@@ -30,7 +30,7 @@ export class CrawlerController {
       throw new HttpException(
         {
           success: false,
-          message: '无效的应用名称',
+          message: 'Invalid app name',
         },
         HttpStatus.BAD_REQUEST,
       );
@@ -40,7 +40,7 @@ export class CrawlerController {
       const result = await this.crawlerService.crawlNoteDataByAppName(appName);
       return {
         success: result.success,
-        message: result.success ? '爬取成功' : '爬取失败',
+        message: result.success ? 'Crawl successful' : 'Crawl failed',
         data: result.data,
         error: result.error,
       };
@@ -48,7 +48,7 @@ export class CrawlerController {
       throw new HttpException(
         {
           success: false,
-          message: '爬取过程中发生错误',
+          message: 'Error occurred during crawling',
           error: error instanceof Error ? error.message : 'Unknown error',
         },
         HttpStatus.INTERNAL_SERVER_ERROR,

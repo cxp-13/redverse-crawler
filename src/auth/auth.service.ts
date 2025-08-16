@@ -119,7 +119,6 @@ export class AuthService {
     // 同步到Redis
     try {
       await this.redisService.setProgress(this.systemStatus);
-      this.logger.debug('System status updated in Redis');
     } catch (error) {
       this.logger.error('Failed to update status in Redis:', error);
       // 继续执行，不因Redis错误中断业务逻辑
@@ -147,7 +146,6 @@ export class AuthService {
       this.currentSession.startTime = Date.now();
 
       // 导航到创作者后台登录页面
-      this.logger.log('Navigating to Xiaohongshu Creator Center login page...');
       await page.goto(this.XHS_LOGIN_URL, {
         waitUntil: 'networkidle2',
         timeout: 60000,

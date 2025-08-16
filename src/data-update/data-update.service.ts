@@ -4,7 +4,6 @@ import { CrawlerService } from '../crawler/crawler.service';
 import { SupabaseService } from '../lib/supabase';
 import { RedisService } from '../redis/redis.service';
 import { EmailService } from '../email/email.service';
-import { ClerkService } from '../clerk/clerk.service';
 import { RetryUtil } from '../common/utils/retry.util';
 
 interface Note {
@@ -30,7 +29,7 @@ export class DataUpdateService {
   private isUpdating = false;
   private readonly maxConcurrentRequests = 3;
   private readonly retryOptions = {
-    maxRetries: 3,
+    maxRetries: 10,
     baseDelay: 1000,
     maxDelay: 10000,
     exponentialBackoff: true,
@@ -42,7 +41,6 @@ export class DataUpdateService {
     private supabaseService: SupabaseService,
     private redisService: RedisService,
     private emailService: EmailService,
-    private clerkService: ClerkService,
   ) {
     // 设置登录成功后的回调
     this.authService.setLoginSuccessCallback(() => {
@@ -50,15 +48,13 @@ export class DataUpdateService {
     });
   }
 
-  // 开始批量更新
   async startBatchUpdate(): Promise<void> {
     if (this.isUpdating) {
-      this.logger.warn('Batch update already in progress');
       return;
     }
 
     this.isUpdating = true;
-    this.logger.log('🚀 Starting batch update process...');
+    this.logger.log('Batch update started');
 
     try {
       // 更新状态为"更新中"
@@ -71,15 +67,12 @@ export class DataUpdateService {
         },
       });
 
-      // 获取所有应用和对应的笔记
       const appsWithNotes = await this.fetchAllApplicationsWithNotes();
       if (!appsWithNotes || appsWithNotes.length === 0) {
-        this.logger.warn('No applications with notes found to update');
         await this.authService.updateSystemStatus({
           updateStatus: 'completed',
           lastUpdate: new Date(),
         });
-        // 清理Redis进度数据
         await this.redisService.deleteProgress();
         return;
       }
@@ -100,7 +93,7 @@ export class DataUpdateService {
       });
 
       this.logger.log(
-        `📊 Found ${appsWithNotes.length} applications with ${totalNotes} total notes to update`,
+        `[Data Update] Processing ${totalNotes} notes from ${appsWithNotes.length} apps`,
       );
 
       // 逐个应用处理
@@ -109,10 +102,6 @@ export class DataUpdateService {
 
       for (const appWithNotes of appsWithNotes) {
         const { application, notes } = appWithNotes;
-
-        this.logger.log(
-          `🔄 Processing application: "${application.name}" with ${notes.length} notes`,
-        );
 
         try {
           // 通过应用名称搜索获取最新数据
@@ -132,12 +121,9 @@ export class DataUpdateService {
               async (note, success) => {
                 if (success) {
                   processed++;
-                  this.logger.log(
-                    `✅ Successfully updated note: ${note.id} for app "${application.name}"`,
-                  );
                 } else {
                   failed++;
-                  this.logger.error(`❌ Error updating note ${note.id}`);
+                  this.logger.error(`Failed to update note ${note.id}`);
                 }
 
                 // 更新进度
@@ -155,7 +141,7 @@ export class DataUpdateService {
             failed += notes.length;
             processed += notes.length; // 仍然计入已处理，避免卡住
             this.logger.error(
-              `❌ Failed to get data for app "${application.name}": ${result.error}`,
+              `Failed to get data for app "${application.name}": ${result.error}`,
             );
 
             // 更新进度
@@ -168,10 +154,28 @@ export class DataUpdateService {
             });
           }
         } catch (error) {
+          // Check if this is a network/critical error that should stop the process
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          const isNetworkError =
+            errorMessage.includes('Application not found') ||
+            errorMessage.includes('fetch failed') ||
+            errorMessage.includes('Network error');
+
+          if (isNetworkError) {
+            this.logger.error(
+              `Critical error processing app "${application.name}", stopping process:`,
+              error,
+            );
+            // Re-throw to stop the entire process
+            throw error;
+          }
+
+          // For non-critical errors, continue with next app
           failed += notes.length;
           processed += notes.length;
           this.logger.error(
-            `❌ Error processing app "${application.name}":`,
+            `Error processing app "${application.name}":`,
             error,
           );
 
@@ -185,29 +189,21 @@ export class DataUpdateService {
           });
         }
 
-        // 添加进度更新调试日志
-        this.logger.log(
-          `📊 Progress: ${processed}/${totalNotes} (failed: ${failed}) at ${new Date().toLocaleTimeString()}`,
-        );
-
         // 避免请求过快，添加延迟
         await this.delay(3000);
       }
 
-      // 更新完成
       this.logger.log(
-        `🎉 Batch update completed! Processed: ${processed}, Failed: ${failed}`,
+        `[Data Update] Batch update completed: ${processed} processed, ${failed} failed`,
       );
       await this.authService.updateSystemStatus({
         updateStatus: 'completed',
         lastUpdate: new Date(),
       });
 
-      // 清理Redis进度数据
       await this.redisService.deleteProgress();
-      this.logger.log('🗑️ Progress data cleaned from Redis');
     } catch (error) {
-      this.logger.error('❌ Batch update failed:', error);
+      this.logger.error('Batch update failed:', error);
       await this.authService.updateSystemStatus({
         updateStatus: 'failed',
         error: error instanceof Error ? error.message : 'Unknown error',
@@ -242,7 +238,6 @@ export class DataUpdateService {
         }
 
         if (!applications || applications.length === 0) {
-          this.logger.warn('No applications found');
           return [];
         }
 
@@ -294,11 +289,8 @@ export class DataUpdateService {
       shares_count: number;
     },
   ): Promise<void> {
-    const maxRetries = 3;
-    const baseDelay = 1000; // 1 second
-
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
+    try {
+      await RetryUtil.withRetry(async () => {
         const supabase = this.supabaseService.getClient();
         const updateData = {
           likes_count: data.likes_count,
@@ -314,50 +306,17 @@ export class DataUpdateService {
           .eq('id', noteId);
 
         if (error) {
-          throw error;
-        }
-
-        // Success - log and return
-        if (attempt > 1) {
-          this.logger.log(
-            `✅ Successfully updated note ${noteId} on attempt ${attempt}`,
+          throw new Error(
+            `Supabase error: ${error.message || JSON.stringify(error)}`,
           );
         }
-        return;
-      } catch (error) {
-        const isLastAttempt = attempt === maxRetries;
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
-
-        // Check if it's a network-related error that might benefit from retry
-        const isRetryableError =
-          errorMessage.includes('fetch failed') ||
-          errorMessage.includes('ECONNRESET') ||
-          errorMessage.includes('ETIMEDOUT') ||
-          errorMessage.includes('AbortError');
-
-        if (!isRetryableError || isLastAttempt) {
-          this.logger.error(
-            `Failed to update note ${noteId} in Supabase (attempt ${attempt}/${maxRetries}):`,
-            {
-              message: errorMessage,
-              details: error instanceof Error ? error.stack : String(error),
-              noteId,
-              attempt,
-              isRetryableError,
-            },
-          );
-          throw error;
-        }
-
-        // Calculate delay with exponential backoff
-        const delay = baseDelay * Math.pow(2, attempt - 1);
-        this.logger.warn(
-          `Failed to update note ${noteId} (attempt ${attempt}/${maxRetries}): ${errorMessage}. Retrying in ${delay}ms...`,
-        );
-
-        await this.delay(delay);
-      }
+      }, this.retryOptions);
+    } catch (error) {
+      this.logger.error(
+        `Failed to update note ${noteId} after retries:`,
+        error,
+      );
+      throw error;
     }
   }
 
@@ -366,21 +325,27 @@ export class DataUpdateService {
     appId: string,
   ): Promise<Application | null> {
     try {
-      const supabase = this.supabaseService.getClient();
-      const { data, error } = await supabase
-        .from('applications')
-        .select('id, name, user_id')
-        .eq('id', appId)
-        .single();
+      return await RetryUtil.withRetry(async () => {
+        const supabase = this.supabaseService.getClient();
+        const { data, error } = await supabase
+          .from('applications')
+          .select('id, name, user_id')
+          .eq('id', appId)
+          .single();
 
-      if (error) {
-        this.logger.error(`Failed to fetch application ${appId}:`, error);
-        return null;
-      }
+        if (error) {
+          throw new Error(
+            `Supabase error: ${error.message || JSON.stringify(error)}`,
+          );
+        }
 
-      return data as Application;
+        return data as Application;
+      }, this.retryOptions);
     } catch (error) {
-      this.logger.error(`Error fetching application ${appId}:`, error);
+      this.logger.error(
+        `Failed to fetch application ${appId} after retries:`,
+        error,
+      );
       return null;
     }
   }
@@ -400,11 +365,7 @@ export class DataUpdateService {
       // 1. 更新数据到Supabase
       await this.updateNoteInSupabase(note.id, newData);
 
-      // 2. 如果没有app_id，跳过邮件发送
       if (!note.app_id) {
-        this.logger.debug(
-          `Note ${note.id} has no app_id, skipping email notification`,
-        );
         return;
       }
 
@@ -416,29 +377,14 @@ export class DataUpdateService {
         newData.views_count !== (note.views_count || 0) ||
         newData.shares_count !== (note.shares_count || 0);
 
-      this.logger.debug(
-        `Processing note ${note.id}, hasChanges: ${hasChanges}. Always sending complete data email.`,
-      );
-
       // 4. 获取应用信息
       const application = await this.getApplicationByAppId(note.app_id);
       if (!application) {
-        this.logger.warn(
-          `Application not found for app_id ${note.app_id}, skipping email notification`,
-        );
-        return;
+        this.logger.error(`Application not found for app_id ${note.app_id}`);
+        throw new Error(`Application not found for app_id ${note.app_id}`);
       }
 
-      // 5. 获取用户邮箱
-      const userEmail = await this.clerkService.getUserEmailByUserId(
-        application.user_id,
-      );
-      if (!userEmail) {
-        this.logger.warn(
-          `User email not found for user_id ${application.user_id}, skipping email notification`,
-        );
-        return;
-      }
+      // No need to get user email here anymore - redverse API will handle it
 
       // 6. 计算变化
       const changes = {
@@ -470,11 +416,13 @@ export class DataUpdateService {
       };
 
       // 7. 发送完整数据邮件通知（无论是否有变化）
+      const emailAction = hasChanges ? 'updated' : 'report';
+
       try {
         await this.emailService.sendNoteNotification({
-          userEmail,
+          userId: application.user_id,
           projectName: application.name,
-          action: hasChanges ? 'updated' : 'report',
+          action: emailAction,
           noteUrl: note.url,
           changes,
           completeData: {
@@ -486,19 +434,16 @@ export class DataUpdateService {
           },
           dataDate: new Date().toISOString(),
         });
-        this.logger.log(
-          `📧 Email notification sent to ${userEmail} for ${application.name}`,
-        );
       } catch (emailError) {
         const errorMessage =
           emailError instanceof Error ? emailError.message : String(emailError);
         this.logger.error(
-          `Failed to send email notification for note ${note.id}:`,
+          `[Data Update] Email sending failed - project: "${application.name}", userID: ${application.user_id}`,
           {
             message: errorMessage,
             noteId: note.id,
             noteUrl: note.url,
-            userEmail,
+            userId: application.user_id,
             appName: application?.name,
           },
         );
@@ -546,6 +491,16 @@ export class DataUpdateService {
           this.logger.error(`Error processing item:`, error);
           if (onComplete) {
             await onComplete(item, false);
+          }
+          // Re-throw network-related errors to stop the entire process
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          if (
+            errorMessage.includes('Application not found') ||
+            errorMessage.includes('fetch failed') ||
+            errorMessage.includes('Network error')
+          ) {
+            throw error;
           }
         }
       });

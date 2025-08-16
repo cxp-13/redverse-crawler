@@ -47,8 +47,9 @@ export class RetryUtil {
           delay = Math.min(baseDelay * Math.pow(2, attempt - 1), maxDelay);
         }
 
+        // Note: Using console.log instead of Logger to avoid circular dependencies
         console.log(
-          `Retry attempt ${attempt}/${maxRetries} failed: ${
+          `[RETRY] Attempt ${attempt}/${maxRetries} failed: ${
             error instanceof Error ? error.message : String(error)
           }. Retrying in ${delay}ms...`,
         );

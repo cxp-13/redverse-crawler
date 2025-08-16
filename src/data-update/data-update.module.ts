@@ -5,10 +5,9 @@ import { CrawlerModule } from '../crawler/crawler.module';
 import { SupabaseService } from '../lib/supabase';
 import { RedisModule } from '../redis/redis.module';
 import { EmailModule } from '../email/email.module';
-import { ClerkModule } from '../clerk/clerk.module';
 
 @Module({
-  imports: [AuthModule, CrawlerModule, RedisModule, EmailModule, ClerkModule],
+  imports: [AuthModule, CrawlerModule, RedisModule, EmailModule],
   providers: [DataUpdateService, SupabaseService],
   exports: [DataUpdateService],
 })

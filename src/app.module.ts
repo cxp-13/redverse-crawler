@@ -10,7 +10,6 @@ import { DataUpdateModule } from './data-update/data-update.module';
 import { RedisModule } from './redis/redis.module';
 import { ProgressModule } from './progress/progress.module';
 import { EmailModule } from './email/email.module';
-import { ClerkModule } from './clerk/clerk.module';
 
 @Module({
   imports: [
@@ -24,7 +23,6 @@ import { ClerkModule } from './clerk/clerk.module';
     DataUpdateModule,
     ProgressModule,
     EmailModule,
-    ClerkModule,
   ],
   controllers: [AppController],
   providers: [AppService, SupabaseService],

@@ -36,16 +36,14 @@ export class RedisService {
       throw new Error('Redis URL and Token must be provided');
     }
 
-    this.logger.log(`Connecting to Upstash Redis...`);
-
     try {
       this.redis = new Redis({
         url: url,
         token: token,
       });
-      this.logger.log('✅ Redis client initialized successfully');
+      this.logger.log('Redis client initialized');
     } catch (error) {
-      this.logger.error('❌ Failed to initialize Redis client:', error);
+      this.logger.error('Failed to initialize Redis client:', error);
       throw error;
     }
   }
@@ -53,29 +51,17 @@ export class RedisService {
   // 设置进度数据，24小时自动过期
   async setProgress(data: LoginStatus): Promise<void> {
     try {
-      // 确保data是一个有效的对象，并正确处理Date类型
-      this.logger.debug(
-        `Input data type: ${typeof data}, keys: ${Object.keys(data).join(', ')}`,
-      );
-
       const serializedData = JSON.stringify(data, (key, value) => {
         // 将Date对象转换为ISO字符串
         if (value instanceof Date) {
-          this.logger.debug(
-            `Converting Date field ${key}: ${value.toISOString()}`,
-          );
           return value.toISOString();
         }
         return value as unknown;
       });
 
-      this.logger.debug(`Serializing data to Redis: ${serializedData}`);
       await this.redis.setex(this.PROGRESS_KEY, 86400, serializedData); // 24小时TTL
-      this.logger.debug(
-        `✅ Progress data saved to Redis successfully: ${JSON.stringify(data.progress)}`,
-      );
     } catch (error) {
-      this.logger.error('❌ Failed to save progress to Redis:', error);
+      this.logger.error('Failed to save progress to Redis:', error);
       this.logger.error(
         'Data that failed to serialize:',
         JSON.stringify(data, null, 2),
@@ -89,14 +75,8 @@ export class RedisService {
     try {
       const data = await this.redis.get(this.PROGRESS_KEY);
       if (!data) {
-        this.logger.debug('No progress data found in Redis');
         return null;
       }
-
-      // 记录原始数据用于调试
-      this.logger.debug(
-        `Raw data from Redis: type=${typeof data}, constructor=${data?.constructor?.name ?? 'undefined'}, value=${typeof data === 'object' && data !== null ? JSON.stringify(data) : '[non-object]'}`,
-      );
 
       let dataString: string;
 
@@ -105,15 +85,11 @@ export class RedisService {
         dataString = data;
       } else if (typeof data === 'object' && data !== null) {
         // 如果Upstash返回的是对象而不是字符串，直接使用
-        this.logger.debug('Data is already an object, using directly');
         const progress = data as unknown as LoginStatus;
         // 处理lastUpdate字段
         if (progress.lastUpdate && typeof progress.lastUpdate === 'string') {
           progress.lastUpdate = new Date(progress.lastUpdate);
         }
-        this.logger.debug(
-          `Progress data retrieved from Redis: ${JSON.stringify(progress.progress)}`,
-        );
         return progress;
       } else {
         dataString =
@@ -131,9 +107,6 @@ export class RedisService {
         return value as unknown;
       }) as LoginStatus;
 
-      this.logger.debug(
-        `Progress data retrieved from Redis: ${JSON.stringify(progress.progress)}`,
-      );
       return progress;
     } catch (error) {
       this.logger.error('Failed to retrieve progress from Redis:');

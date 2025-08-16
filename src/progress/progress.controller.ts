@@ -49,11 +49,9 @@ export class ProgressController {
     error?: string;
   }> {
     try {
-      this.logger.log('📊 Progress API called');
       const progress = await this.redisService.getProgress();
 
       if (!progress) {
-        this.logger.log('📊 No progress data found, returning default state');
         // 返回默认状态
         const defaultState = {
           loginStatus: 'idle' as const,
@@ -70,9 +68,6 @@ export class ProgressController {
         };
       }
 
-      this.logger.log(
-        `📊 Progress data retrieved successfully: status=${progress.loginStatus}/${progress.updateStatus}, progress=${JSON.stringify(progress.progress)}`,
-      );
       return {
         success: true,
         data: progress,
